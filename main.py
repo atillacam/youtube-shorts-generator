@@ -18,6 +18,7 @@ try:
         TextClip,
         CompositeVideoClip,
         CompositeAudioClip,
+        concatenate_videoclips,
         vfx,
         afx,
     )
@@ -34,6 +35,7 @@ except ImportError:
         TextClip,
         CompositeVideoClip,
         CompositeAudioClip,
+        concatenate_videoclips,
         vfx,
         afx,
     )
@@ -98,26 +100,29 @@ def generate_shorts_script(topic: str) -> str:
         )
 
     prompt = f"""
-You are an expert viral content creator specializing in high-retention YouTube Shorts and TikTok videos.
+You are an elite viral content creator specializing in hyper-retention YouTube Shorts and TikToks.
 
-Write the script entirely in English, keeping the tone highly engaging, mysterious, and perfect for a viral YouTube Short. Do not include any Turkish words.
+Write the script entirely in English, keeping the tone aggressive, urgent, and mysterious. Do not include any Turkish words.
 
 Topic: {topic}
 
-The script MUST follow this exact 3-part structure (around 30-40 seconds of speaking time):
-1. [0-3s] Hook: An irresistible, scroll-stopping first sentence that triggers extreme curiosity and keeps viewers watching.
-2. [3-25s] Body: 2-3 jaw-dropping facts or insights delivered rapidly with high energy and zero fluff.
-3. [25-30s] Call to Action (CTA): A compelling psychological question prompting comments and subscriptions.
+Write the script using ultra-short, punchy sentences. Eliminate all filler words. Every single sentence must trigger curiosity. Keep the total spoken text around 60-75 words for a highly energetic, fast-paced 30-second delivery.
 
-For each section, you MUST use this exact format:
-- Visual: [Description of fast-paced visuals, footage, or on-screen animations]
-- Voiceover: [The exact words the voiceover narrator speaks aloud]
+The script MUST follow this exact 3-part structure:
+1. [0-3s] Hook: An electrifying, scroll-stopping statement or shocking question that violently grabs attention within the first 2 seconds. Make it bold, provocative, or alarming to shock the viewer.
+2. [3-25s] Body: 2-3 rapid-fire, jaw-dropping facts delivered with extreme momentum and zero fluff. Every word must hit hard.
+3. [25-30s] Call to Action (CTA): A sharp, psychological cliffhanger or controversial question demanding viewers to comment and subscribe before it is too late.
+
+For each section, you MUST strictly use this exact format:
+- Visual: [Brief description of fast-paced visual scene or footage]
+- Voiceover: [The exact words spoken by the narrator]
 
 CRITICAL RULES:
 - Write exclusively in English.
-- Voiceover lines must contain ONLY spoken dialogue. Never include bracketed directions, emojis, or sound effect markers inside Voiceover lines.
+- Voiceover lines must contain ONLY spoken dialogue. Never include bracketed directions, emojis, asterisks, or sound effect markers inside Voiceover lines.
+- Keep sentences short (3-8 words per sentence). Speak with intensity and pace.
 - At the very end of your response, on a new line, add exactly:
-SEARCH_QUERY: [A single English word representing the core visual theme of the video to find matching background footage, e.g., robot, technology, city, coding, money]
+SEARCH_QUERY: [A single English word representing the core visual theme of the video to find matching background footage, e.g., robot, technology, city, hacker, money]
 """
 
     candidate_models = ["gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-3.1-flash-lite"]
@@ -145,31 +150,37 @@ def extract_search_query(script: str, default: str = "technology") -> str:
     return default
 
 
-def download_background_video(query: str, output_path: str = "background.mp4") -> str | None:
-    """Pixabay Video API kullanarak belirtilen arama sorgusuna uygun kaliteli bir arka plan
-    videosu bulur ve 'background.mp4' olarak indirir.
+def download_background_video(
+    query: str,
+    count: int = 3,
+    output_prefix: str = "bg",
+) -> list[str]:
+    """Pixabay Video API kullanarak arama sorgusuna uygun en fazla `count` adet
+    (varsayılan: 3) kaliteli arka plan videosu bulur ve ('bg_1.mp4', 'bg_2.mp4', 'bg_3.mp4')
+    olarak indirir.
 
     Args:
         query: İngilizce arama terimi (örn. 'technology', 'robot', 'city').
-        output_path: İndirilecek video dosyası yolu (varsayılan: background.mp4).
+        count: İndirilecek video sayısı (varsayılan: 3).
+        output_prefix: Dosya adı öneki (varsayılan: 'bg').
 
     Returns:
-        str | None: İndirilen video dosyasının yolu veya başarısız olursa None.
+        list[str]: Başarıyla indirilen video dosyalarının yolları listesi.
     """
     api_key = os.getenv("PIXABAY_API_KEY")
     if not api_key:
         print("[Pixabay] Uyarı: PIXABAY_API_KEY ortam değişkeni bulunamadı (.env dosyasını kontrol edin).")
-        return None
+        return []
 
     clean_query = query.strip().replace("[", "").replace("]", "")
-    print(f"\n[Pixabay] '{clean_query}' araması için arka plan videosu sorgulanıyor...")
+    print(f"\n[Pixabay] '{clean_query}' araması için {count} adet arka plan videosu sorgulanıyor...")
 
     api_url = "https://pixabay.com/api/videos/"
     params = {
         "key": api_key,
         "q": clean_query,
         "video_type": "film",
-        "per_page": 10,
+        "per_page": 20,
         "safesearch": "true",
     }
 
@@ -189,69 +200,95 @@ def download_background_video(query: str, output_path: str = "background.mp4") -
 
         if not hits:
             print("[Pixabay] Uyarı: Hiçbir arka plan videosu bulunamadı.")
-            return None
+            return []
 
-        # 1. Öncelik: Dikey (Portrait) videoları ara (height > width)
-        selected_url = None
-        for hit in hits:
-            videos = hit.get("videos", {})
-            for quality in ("large", "medium", "small"):
-                info = videos.get(quality)
-                if info and info.get("height", 0) > info.get("width", 0) and info.get("url"):
-                    selected_url = info["url"]
-                    print(f"[Pixabay] Dikey (9:16) formatta video bulundu ({info['width']}x{info['height']}).")
-                    break
-            if selected_url:
+        downloaded_files = []
+
+        # Dikey (portrait: height > width) ve HD formatta olan videoları önceliklendir
+        def score_hit(h_item):
+            v_dict = h_item.get("videos", {})
+            v_info = v_dict.get("large") or v_dict.get("medium") or v_dict.get("small") or {}
+            w = v_info.get("width", 0)
+            h = v_info.get("height", 0)
+            # Dikey video (9:16 portrait) en yüksek önceliğe sahiptir
+            is_vertical = 10 if h > w else 0
+            # HD çözünürlük puanı
+            is_hd = 5 if (w >= 1080 or h >= 1080) else (2 if (w >= 720 or h >= 720) else 0)
+            return is_vertical + is_hd
+
+        sorted_hits = sorted(hits, key=score_hit, reverse=True)
+
+        # Aday videoları sırayla dene ve count adet indir
+        for idx, hit in enumerate(sorted_hits):
+            if len(downloaded_files) >= count:
                 break
 
-        # 2. Öncelik: Dikey bulunamazsa en kaliteli yatay videoyu seç (otomatik 1080x1920'ye kırpılacak)
-        if not selected_url:
-            for hit in hits:
-                videos = hit.get("videos", {})
-                for quality in ("large", "medium", "small"):
-                    info = videos.get(quality)
-                    if info and info.get("url"):
-                        selected_url = info["url"]
-                        print(f"[Pixabay] Yüksek kaliteli video seçildi ({info['width']}x{info['height']}).")
+            videos = hit.get("videos", {})
+            # En uygun HD/kaliteli varyantı seç (aşırı büyük 4K dosyaları yerine optimize HD tercih et)
+            info = None
+            for q_name in ["large", "medium", "small"]:
+                candidate = videos.get(q_name)
+                if candidate and candidate.get("url"):
+                    if q_name == "medium" and (candidate.get("width", 0) >= 720 or candidate.get("height", 0) >= 720):
+                        info = candidate
                         break
-                if selected_url:
-                    break
+                    if q_name == "large":
+                        if candidate.get("size", 0) > 35 * 1024 * 1024 and videos.get("medium"):
+                            info = videos.get("medium")
+                        else:
+                            info = candidate
+                        break
+            if not info or not info.get("url"):
+                info = videos.get("large") or videos.get("medium") or videos.get("small")
 
-        if not selected_url:
-            print("[Pixabay] Uyarı: Geçerli bir video indirme bağlantısı bulunamadı.")
-            return None
+            if not info or not info.get("url"):
+                continue
 
-        # Videoyu güvenli akışla indir
-        print("[Pixabay] Video indiriliyor...")
-        downloaded = False
-        try:
-            r = requests.get(selected_url, stream=True, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
-            if r.status_code == 200:
-                with open(output_path, "wb") as f:
-                    for chunk in r.iter_content(chunk_size=65536):
-                        if chunk:
+            video_url = info["url"]
+            output_file = f"{output_prefix}_{len(downloaded_files) + 1}.mp4"
+
+            try:
+                w_curr = info.get("width", 0)
+                h_curr = info.get("height", 0)
+                orientation = "Dikey (Portrait)" if h_curr > w_curr else "Yatay (Landscape)"
+                print(f"[Pixabay] Video {len(downloaded_files) + 1}/{count} indiriliyor ({w_curr}x{h_curr} - {orientation})...")
+                downloaded = False
+                try:
+                    r = requests.get(video_url, stream=True, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
+                    if r.status_code == 200:
+                        with open(output_file, "wb") as f:
+                            for chunk in r.iter_content(chunk_size=65536):
+                                if chunk:
+                                    f.write(chunk)
+                        downloaded = True
+                except Exception:
+                    downloaded = False
+
+                if not downloaded:
+                    req = urllib.request.Request(video_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+                    with urllib.request.urlopen(req) as resp, open(output_file, "wb") as f:
+                        while True:
+                            chunk = resp.read(65536)
+                            if not chunk:
+                                break
                             f.write(chunk)
-                downloaded = True
-        except Exception:
-            downloaded = False
+                    downloaded = True
 
-        if not downloaded:
-            req = urllib.request.Request(selected_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
-            with urllib.request.urlopen(req) as resp, open(output_path, "wb") as f:
-                while True:
-                    chunk = resp.read(65536)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-            downloaded = True
+                if downloaded and os.path.exists(output_file) and os.path.getsize(output_file) > 1000:
+                    size_mb = os.path.getsize(output_file) / (1024 * 1024)
+                    print(f"[Pixabay] Başarılı! {output_file} kaydedildi ({size_mb:.2f} MB)")
+                    downloaded_files.append(output_file)
+                else:
+                    print(f"[Pixabay] Video indirilemedi: {output_file}")
+            except Exception as dl_err:
+                print(f"[Pixabay] Video {len(downloaded_files) + 1} indirme hatası: {dl_err}. Sıradaki video deneniyor...")
 
-        file_size_mb = os.path.getsize(output_path) / (1024 * 1024)
-        print(f"[Pixabay] Başarılı! Video kaydedildi: '{output_path}' ({file_size_mb:.2f} MB)")
-        return output_path
+        print(f"[Pixabay] Toplam {len(downloaded_files)}/{count} arka plan videosu hazırlandı.")
+        return downloaded_files
 
     except Exception as e:
-        print(f"[Pixabay] Arka plan videosu indirilirken hata oluştu: {e}")
-        return None
+        print(f"[Pixabay] Pixabay API sorgulama hatası: {e}")
+        return []
 
 
 def extract_voiceover(script: str) -> str:
@@ -403,42 +440,55 @@ def parse_subtitles(file_path: str) -> list[tuple[float, float, str]]:
 
 
 def split_cue_into_shorts_chunks(
-    start: float, end: float, text: str, max_words: int = 6
+    start: float, end: float, text: str, max_words: int = 2
 ) -> list[tuple[float, float, str]]:
-    """Uzun cümleleri YouTube Shorts dinamiğine uygun 4-6 kelimelik kısa ve vurucu
-    parçalara bölerek sürelerini orantısal olarak dağıtır.
+    """Metni TikTok / YouTube Shorts stiline uygun olarak SADECE 1 veya maksimum 2 kelimelik
+    çok kısa ve dinamik parçalara böler, süreleri kelime uzunluklarına göre hassas dağıtır.
     """
     words = text.split()
-    if len(words) <= max_words:
-        return [(start, end, text)]
+    if not words:
+        return []
 
+    # Eğer zaten 1 veya 2 kelimeden oluşuyorsa doğrudan döndür
+    if len(words) <= max_words:
+        return [(start, end, text.strip())]
+
+    # Kelimeleri SADECE 1 veya maksimum 2 kelimelik parçalara ayır
+    # Noktalama işaretlerine ve konuşma duraklamalarına saygı göster
+    chunks = []
+    i = 0
+    while i < len(words):
+        w1 = words[i]
+        if i + 1 >= len(words):
+            chunks.append([w1])
+            i += 1
+        else:
+            w2 = words[i + 1]
+            # w1 noktalama işaretiyle bitiyorsa (virgül, nokta vb.), duraklama için tek kelime yap
+            if any(w1.endswith(p) for p in [".", ",", "!", "?", ":", ";", "—", "-"]):
+                chunks.append([w1])
+                i += 1
+            else:
+                chunks.append([w1, w2])
+                i += 2
+
+    # Her parçanın karakter uzunluğuna göre süreyi orantısal olarak dağıt
     total_chars = sum(len(w) for w in words)
     duration = end - start
 
-    chunks = []
-    current_chunk = []
-    for word in words:
-        current_chunk.append(word)
-        if len(current_chunk) >= max_words:
-            chunks.append(current_chunk)
-            current_chunk = []
-    if current_chunk:
-        if len(chunks) > 0 and len(current_chunk) <= 2:
-            chunks[-1].extend(current_chunk)
-        else:
-            chunks.append(current_chunk)
-
     sub_cues = []
     cur_start = start
-    for i, chk in enumerate(chunks):
-        chk_text = " ".join(chk)
+    for idx, chk in enumerate(chunks):
+        chk_text = " ".join(chk).strip()
         chk_chars = sum(len(w) for w in chk)
-        if i == len(chunks) - 1:
+        if idx == len(chunks) - 1:
             chk_end = end
         else:
             chk_duration = duration * (chk_chars / total_chars)
             chk_end = cur_start + chk_duration
-        sub_cues.append((cur_start, chk_end, chk_text))
+
+        if chk_end > cur_start:
+            sub_cues.append((cur_start, chk_end, chk_text))
         cur_start = chk_end
 
     return sub_cues
@@ -446,9 +496,11 @@ def split_cue_into_shorts_chunks(
 
 def create_subtitle_clips(
     subtitles: list[tuple[float, float, str]],
+    font_size: int = 88,
 ) -> list[TextClip]:
-    """Zaman damgalı altyazı listesini YouTube Shorts dinamiklerine uygun olarak
-    büyük, kalın (Bold), beyaz ve 5px siyah konturlu stilize TextClip nesnelerine dönüştürür.
+    """Zaman damgalı altyazı listesini TikTok / YouTube Shorts dinamiklerine uygun olarak
+    SADECE 1 veya maksimum 2 kelimelik, büyük (font_size=88), kalın (Bold), beyaz ve 5px siyah konturlu
+    ultra dinamik TextClip nesnelerine dönüştürür.
     """
     subtitle_clips = []
 
@@ -456,19 +508,23 @@ def create_subtitle_clips(
     font_path = "C:/Windows/Fonts/arialbd.ttf" if os.path.exists("C:/Windows/Fonts/arialbd.ttf") else None
 
     for start_sec, end_sec, text in subtitles:
-        # Cümleyi 4-6 kelimelik parçalara ayırarak ekranda hızlı ve dinamik değişmesini sağla
-        chunks = split_cue_into_shorts_chunks(start_sec, end_sec, text, max_words=6)
+        # Metni SADECE 1 veya maksimum 2 kelimelik parçalara ayır
+        chunks = split_cue_into_shorts_chunks(start_sec, end_sec, text, max_words=2)
 
         for c_start, c_end, c_text in chunks:
-            duration = max(0.2, c_end - c_start)
-            # En fazla 2 satırda toplanması için metni sar
-            wrapped = textwrap.fill(c_text, width=22)
+            c_text_clean = c_text.strip()
+            if not c_text_clean:
+                continue
+
+            duration = max(0.04, c_end - c_start)
+            # Metni sar (1-2 kelime genellikle tek satır kalır)
+            wrapped = textwrap.fill(c_text_clean, width=16)
 
             tc = (
                 TextClip(
                     font=font_path,
                     text=wrapped,
-                    font_size=66,
+                    font_size=font_size,
                     color="white",
                     stroke_color="black",
                     stroke_width=5,
@@ -540,20 +596,23 @@ def ensure_vertical_aspect_ratio(clip, target_w: int = 1080, target_h: int = 192
 
 def create_final_video(
     audio_path: str = "output.mp3",
-    bg_path: str = "background.mp4",
+    bg_paths: list[str] | str = None,
     subtitle_path: str = "output.srt",
     music_path: str = "bg_music.mp3",
     output_path: str = "final_shorts.mp4",
     fps: int = 24,
+    subtitle_font_size: int = 88,
 ) -> str:
-    """Arka plan videosunu, ana seslendirmeyi, dinamik arka plan müziğini (varsa)
+    """Arka plan videosunu (veya çoklu videoları), ana seslendirmeyi, dinamik arka plan müziğini (varsa)
     ve stilize altyazıları birleştirerek 9:16 (1080x1920) formatında YouTube Shorts videosu oluşturur.
 
-    - Eğer `background.mp4` yoksa, 1080x1920 boyutunda koyu renkli statik bir ColorClip oluşturur.
+    - Eğer `bg_paths` listesindeki videolar mevcutsa, her birini 1080x1920 (9:16) formatına dönüştürüp
+      `concatenate_videoclips` ile uç uca ekler.
+    - Hiçbir video yoksa, 1080x1920 boyutunda koyu renkli statik bir ColorClip oluşturur.
     - `output.mp3` ses dosyasını yükler ve süresini ölçer.
     - `bg_music.mp3` mevcutsa sesini %12 seviyesine kısar, video süresine göre keser veya döngüye alır
       ve CompositeAudioClip ile ana seslendirmeyle birleştirir.
-    - Video süresini tam olarak ses süresine göre ayarlar (kırpma veya loop).
+    - Birleştirilmiş arka plan videosunu tam olarak ses süresine göre ayarlar (kırpma veya loop).
     - Mikslenen sesi videoya entegre eder (with_audio / set_audio).
     - `output.srt` (veya .vtt) dosyasından altyazıları okur ve ekranın ortasına stilize katman olarak ekler.
     - CompositeVideoClip ile tüm katmanları birleştirir.
@@ -612,38 +671,64 @@ def create_final_video(
     else:
         print(f"[Ses Miksajı] '{music_path}' bulunamadı. Sadece ana seslendirme (Voiceover) kullanılacak.")
 
-    # 2. Arka plan kontrolü (background.mp4 var mı?)
-    if os.path.exists(bg_path):
-        print(f"[Video Kurgu] Arka plan videosu bulundu: '{bg_path}'")
-        video_clip = VideoFileClip(bg_path)
+    # 2. Arka plan kontrolü ve çoklu video birleştirme (Multi-Video Concatenation)
+    if isinstance(bg_paths, str):
+        candidate_bg_files = [bg_paths]
+    elif isinstance(bg_paths, list):
+        candidate_bg_files = bg_paths
+    else:
+        candidate_bg_files = ["bg_1.mp4", "bg_2.mp4", "bg_3.mp4", "background.mp4"]
+
+    valid_bg_files = [f for f in candidate_bg_files if os.path.exists(f)]
+    loaded_clips = []
+
+    if valid_bg_files:
+        print(f"[Video Kurgu] {len(valid_bg_files)} adet arka plan videosu bulundu: {valid_bg_files}")
+        for video_path in valid_bg_files:
+            try:
+                clip = VideoFileClip(video_path)
+                # Her bir videoyu 1080x1920 (9:16) formatına dönüştür
+                clip = ensure_vertical_aspect_ratio(clip, 1080, 1920)
+                loaded_clips.append(clip)
+                print(f"[Video Kurgu] Video klip eklendi: '{video_path}' (Süre: {clip.duration:.2f}s)")
+            except Exception as e:
+                print(f"[Video Kurgu] Uyarı: '{video_path}' yüklenemedi ({e}). Diğer kliplerle devam ediliyor.")
+
+    if loaded_clips:
+        try:
+            if len(loaded_clips) > 1:
+                print(f"[Video Kurgu] {len(loaded_clips)} farklı arka plan klibi uç uca birleştiriliyor (concatenate_videoclips)...")
+                video_clip = concatenate_videoclips(loaded_clips)
+            else:
+                video_clip = loaded_clips[0]
+        except Exception as concat_err:
+            print(f"[Video Kurgu] Klipler birleştirilirken hata oluştu ({concat_err}). İlk geçerli klip kullanılıyor...")
+            video_clip = loaded_clips[0]
+
         bg_duration = video_clip.duration
-        print(f"[Video Kurgu] Mevcut video süresi: {bg_duration:.2f} saniye")
+        print(f"[Video Kurgu] Birleştirilmiş arka plan videosu toplam süresi: {bg_duration:.2f} saniye")
 
         if bg_duration >= audio_duration:
-            print("[Video Kurgu] Video sesten uzun, video ses süresine kırpılıyor...")
+            print("[Video Kurgu] Birleştirilmiş video sesten uzun, video ses süresine göre kırpılıyor...")
             if hasattr(video_clip, "subclipped"):
                 video_clip = video_clip.subclipped(0, audio_duration)
             else:
                 video_clip = video_clip.subclip(0, audio_duration)
         else:
-            print("[Video Kurgu] Video sesten kısa, video ses süresine kadar loop ediliyor...")
+            print("[Video Kurgu] Birleştirilmiş video sesten kısa, video ses süresine kadar döngüye alınıyor...")
             if hasattr(video_clip, "with_effects") and hasattr(vfx, "Loop"):
                 video_clip = video_clip.with_effects([vfx.Loop(duration=audio_duration)])
             elif hasattr(vfx, "loop"):
                 video_clip = vfx.loop(video_clip, duration=audio_duration)
             else:
                 n_loops = int(audio_duration // bg_duration) + 1
-                from moviepy import concatenate_videoclips
                 video_clip = concatenate_videoclips([video_clip] * n_loops)
                 if hasattr(video_clip, "subclipped"):
                     video_clip = video_clip.subclipped(0, audio_duration)
                 else:
                     video_clip = video_clip.subclip(0, audio_duration)
-
-        # 9:16 (1080x1920) dikey format garantisi
-        video_clip = ensure_vertical_aspect_ratio(video_clip, 1080, 1920)
     else:
-        print(f"[Video Kurgu] '{bg_path}' bulunamadı. 1080x1920 koyu renkli statik ColorClip oluşturuluyor...")
+        print("[Video Kurgu] Arka plan videosu bulunamadı. 1080x1920 koyu renkli statik ColorClip oluşturuluyor...")
         video_clip = ColorClip(
             size=(1080, 1920),
             color=(20, 24, 33),
@@ -675,8 +760,8 @@ def create_final_video(
     if os.path.exists(sub_file_to_use):
         print(f"[Video Kurgu] Altyazı dosyası okunuyor: '{sub_file_to_use}'...")
         subtitles = parse_subtitles(sub_file_to_use)
-        print(f"[Video Kurgu] {len(subtitles)} altyazı bloğu bulundu. Stilize TextClip katmanları oluşturuluyor...")
-        subtitle_clips = create_subtitle_clips(subtitles)
+        print(f"[Video Kurgu] {len(subtitles)} altyazı bloğu bulundu. TikTok stili (1-2 kelimelik, font_size={subtitle_font_size}) stilize TextClip katmanları oluşturuluyor...")
+        subtitle_clips = create_subtitle_clips(subtitles, font_size=subtitle_font_size)
         layers.extend(subtitle_clips)
         print(f"[Video Kurgu] Toplam {len(subtitle_clips)} adet dinamik altyazı karesi hazırlandı.")
     else:
@@ -710,6 +795,11 @@ def create_final_video(
             ac.close()
         except Exception:
             pass
+    for lc in loaded_clips:
+        try:
+            lc.close()
+        except Exception:
+            pass
     try:
         video_clip.close()
     except Exception:
@@ -734,16 +824,15 @@ async def main():
         print(script)
         print("\n" + "=" * 40 + "\n")
 
-        # 2. Arka plan arama terimini ayıkla ve Pixabay'den ilgili videoyu indir
-        bg_video_path = "background.mp4"
+        # 2. Arka plan arama terimini ayıkla ve Pixabay'den 3 farklı video indir
         search_query = extract_search_query(script, default="technology")
-        print("=== 2. PIXABAY BACKGROUND VIDEO DOWNLOAD ===")
+        print("=== 2. PIXABAY MULTI-VIDEO BACKGROUND DOWNLOAD ===")
         print(f"Extracted search query: '{search_query}'")
-        downloaded_bg = download_background_video(search_query, output_path=bg_video_path)
-        if downloaded_bg:
-            print(f"Using downloaded Pixabay background video: '{bg_video_path}'")
+        downloaded_bgs = download_background_video(search_query, count=3, output_prefix="bg")
+        if downloaded_bgs:
+            print(f"Using {len(downloaded_bgs)} downloaded Pixabay background videos: {downloaded_bgs}")
         else:
-            print("Background video could not be downloaded. Falling back to default background.")
+            print("Background videos could not be downloaded. Falling back to default background.")
         print("\n" + "=" * 40 + "\n")
 
         # 3. Sadece seslendirilecek metni ayıkla
@@ -769,7 +858,7 @@ async def main():
         print("=== 5. VIDEO EDITING, AUDIO MIXING & CAPTIONS COMPOSITING ===")
         create_final_video(
             audio_path=output_audio,
-            bg_path=bg_video_path,
+            bg_paths=downloaded_bgs if downloaded_bgs else "background.mp4",
             subtitle_path=output_subtitle,
             music_path="bg_music.mp3",
             output_path="final_shorts.mp4",
