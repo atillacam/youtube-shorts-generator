@@ -3,6 +3,8 @@ import sys
 import re
 import textwrap
 import asyncio
+import urllib.request
+import requests
 from dotenv import load_dotenv
 import google.generativeai as genai
 import edge_tts
@@ -114,6 +116,8 @@ For each section, you MUST use this exact format:
 CRITICAL RULES:
 - Write exclusively in English.
 - Voiceover lines must contain ONLY spoken dialogue. Never include bracketed directions, emojis, or sound effect markers inside Voiceover lines.
+- At the very end of your response, on a new line, add exactly:
+SEARCH_QUERY: [A single English word representing the core visual theme of the video to find matching background footage, e.g., robot, technology, city, coding, money]
 """
 
     candidate_models = ["gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-3.1-flash-lite"]
@@ -131,15 +135,134 @@ CRITICAL RULES:
     raise RuntimeError(f"Senaryo üretilemedi: {last_error}")
 
 
+def extract_search_query(script: str, default: str = "technology") -> str:
+    """Senaryonun altındaki SEARCH_QUERY etiketinden arka plan arama terimini ayıklar."""
+    match = re.search(r"SEARCH_QUERY\s*:\s*\[?([a-zA-Z0-9_\-]+)\]?", script, re.IGNORECASE)
+    if match:
+        query = match.group(1).strip().lower()
+        if query:
+            return query
+    return default
+
+
+def download_background_video(query: str, output_path: str = "background.mp4") -> str | None:
+    """Pixabay Video API kullanarak belirtilen arama sorgusuna uygun kaliteli bir arka plan
+    videosu bulur ve 'background.mp4' olarak indirir.
+
+    Args:
+        query: İngilizce arama terimi (örn. 'technology', 'robot', 'city').
+        output_path: İndirilecek video dosyası yolu (varsayılan: background.mp4).
+
+    Returns:
+        str | None: İndirilen video dosyasının yolu veya başarısız olursa None.
+    """
+    api_key = os.getenv("PIXABAY_API_KEY")
+    if not api_key:
+        print("[Pixabay] Uyarı: PIXABAY_API_KEY ortam değişkeni bulunamadı (.env dosyasını kontrol edin).")
+        return None
+
+    clean_query = query.strip().replace("[", "").replace("]", "")
+    print(f"\n[Pixabay] '{clean_query}' araması için arka plan videosu sorgulanıyor...")
+
+    api_url = "https://pixabay.com/api/videos/"
+    params = {
+        "key": api_key,
+        "q": clean_query,
+        "video_type": "film",
+        "per_page": 10,
+        "safesearch": "true",
+    }
+
+    try:
+        response = requests.get(api_url, params=params, timeout=15)
+        response.raise_for_status()
+        data = response.json()
+        hits = data.get("hits", [])
+
+        # Eğer sorgu ile sonuç bulunamadıysa popüler genel bir sorgu ile dene
+        if not hits:
+            print(f"[Pixabay] '{clean_query}' için video bulunamadı. Genel 'technology' sorgusu deneniyor...")
+            params["q"] = "technology"
+            response = requests.get(api_url, params=params, timeout=15)
+            data = response.json()
+            hits = data.get("hits", [])
+
+        if not hits:
+            print("[Pixabay] Uyarı: Hiçbir arka plan videosu bulunamadı.")
+            return None
+
+        # 1. Öncelik: Dikey (Portrait) videoları ara (height > width)
+        selected_url = None
+        for hit in hits:
+            videos = hit.get("videos", {})
+            for quality in ("large", "medium", "small"):
+                info = videos.get(quality)
+                if info and info.get("height", 0) > info.get("width", 0) and info.get("url"):
+                    selected_url = info["url"]
+                    print(f"[Pixabay] Dikey (9:16) formatta video bulundu ({info['width']}x{info['height']}).")
+                    break
+            if selected_url:
+                break
+
+        # 2. Öncelik: Dikey bulunamazsa en kaliteli yatay videoyu seç (otomatik 1080x1920'ye kırpılacak)
+        if not selected_url:
+            for hit in hits:
+                videos = hit.get("videos", {})
+                for quality in ("large", "medium", "small"):
+                    info = videos.get(quality)
+                    if info and info.get("url"):
+                        selected_url = info["url"]
+                        print(f"[Pixabay] Yüksek kaliteli video seçildi ({info['width']}x{info['height']}).")
+                        break
+                if selected_url:
+                    break
+
+        if not selected_url:
+            print("[Pixabay] Uyarı: Geçerli bir video indirme bağlantısı bulunamadı.")
+            return None
+
+        # Videoyu güvenli akışla indir
+        print("[Pixabay] Video indiriliyor...")
+        downloaded = False
+        try:
+            r = requests.get(selected_url, stream=True, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
+            if r.status_code == 200:
+                with open(output_path, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=65536):
+                        if chunk:
+                            f.write(chunk)
+                downloaded = True
+        except Exception:
+            downloaded = False
+
+        if not downloaded:
+            req = urllib.request.Request(selected_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+            with urllib.request.urlopen(req) as resp, open(output_path, "wb") as f:
+                while True:
+                    chunk = resp.read(65536)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+            downloaded = True
+
+        file_size_mb = os.path.getsize(output_path) / (1024 * 1024)
+        print(f"[Pixabay] Başarılı! Video kaydedildi: '{output_path}' ({file_size_mb:.2f} MB)")
+        return output_path
+
+    except Exception as e:
+        print(f"[Pixabay] Arka plan videosu indirilirken hata oluştu: {e}")
+        return None
+
+
 def extract_voiceover(script: str) -> str:
     """Üretilen senaryo metninden yalnızca seslendirilecek kısımları (Voiceover) ayıklar.
 
-    'Visual:', 'Hook:', 'CTA:', 'Görsel:' gibi yönlendirmeleri, sahne açıklamalarını
+    'Visual:', 'Hook:', 'CTA:', 'SEARCH_QUERY:', 'Görsel:' gibi yönlendirmeleri, sahne açıklamalarını
     ve zaman damgalarını sese dahil etmemek için temizler.
     """
     # 1. Aşama: 'Voiceover:' veya 'Seslendirme:' etiketli blokları yakala
     prefix = r"(?:^|\n)\s*(?:[-*•#\d\.\(\)]+\s*)?(?:\*\*|\*)?(?:Voiceover|Voice-over|Narration|Voice|Seslendirme|Dış\s*Ses|Ses|Metin)(?:\*\*|\*)?\s*:\s*"
-    delimiter = r"(?=(?:\n\s*(?:[-*•#\d\.\(\)]+\s*)?(?:\*\*|\*)?(?:Visual|Visuals|Scene|Video|Voiceover|Voice-over|Narration|Voice|Hook|Body|CTA|Call\s*to\s*Action|Görsel|Seslendirme|Dış\s*Ses|Kanca|Gövde|Kapanış|Sahne|\d+[\.\)])|\Z))"
+    delimiter = r"(?=(?:\n\s*(?:[-*•#\d\.\(\)]+\s*)?(?:\*\*|\*)?(?:Visual|Visuals|Scene|Video|Voiceover|Voice-over|Narration|Voice|Hook|Body|CTA|Call\s*to\s*Action|SEARCH_QUERY|Görsel|Seslendirme|Dış\s*Ses|Kanca|Gövde|Kapanış|Sahne|\d+[\.\)])|\Z))"
     pattern = prefix + r"(.*?)" + delimiter
 
     matches = re.findall(pattern, script, flags=re.IGNORECASE | re.DOTALL)
@@ -611,13 +734,25 @@ async def main():
         print(script)
         print("\n" + "=" * 40 + "\n")
 
-        # 2. Sadece seslendirilecek metni ayıkla
+        # 2. Arka plan arama terimini ayıkla ve Pixabay'den ilgili videoyu indir
+        bg_video_path = "background.mp4"
+        search_query = extract_search_query(script, default="technology")
+        print("=== 2. PIXABAY BACKGROUND VIDEO DOWNLOAD ===")
+        print(f"Extracted search query: '{search_query}'")
+        downloaded_bg = download_background_video(search_query, output_path=bg_video_path)
+        if downloaded_bg:
+            print(f"Using downloaded Pixabay background video: '{bg_video_path}'")
+        else:
+            print("Background video could not be downloaded. Falling back to default background.")
+        print("\n" + "=" * 40 + "\n")
+
+        # 3. Sadece seslendirilecek metni ayıkla
         voiceover_text = extract_voiceover(script)
-        print("=== 2. EXTRACTED VOICEOVER NARRATION ===")
+        print("=== 3. EXTRACTED VOICEOVER NARRATION ===")
         print(voiceover_text)
         print("\n" + "=" * 40 + "\n")
 
-        # 3. Metni Edge TTS + SubMaker ile ses ve altyazı olarak kaydet
+        # 4. Metni Edge TTS + SubMaker ile ses ve altyazı olarak kaydet
         output_audio = "output.mp3"
         output_subtitle = "output.srt"
         print(f"Generating voiceover and time-synced subtitles (Voice: en-US-ChristopherNeural)...")
@@ -629,12 +764,12 @@ async def main():
         )
         print(f"Success! Audio: '{output_audio}', Subtitles: '{output_subtitle}' & '{os.path.splitext(output_subtitle)[0]}.vtt'")
 
-        # 4. Altyazılı Video Kurgu, Ses Miksajı ve Birleştirme
+        # 5. Altyazılı Video Kurgu, Ses Miksajı ve Birleştirme
         print("\n" + "=" * 40)
-        print("=== 3. VIDEO EDITING, AUDIO MIXING & CAPTIONS COMPOSITING ===")
+        print("=== 5. VIDEO EDITING, AUDIO MIXING & CAPTIONS COMPOSITING ===")
         create_final_video(
             audio_path=output_audio,
-            bg_path="background.mp4",
+            bg_path=bg_video_path,
             subtitle_path=output_subtitle,
             music_path="bg_music.mp3",
             output_path="final_shorts.mp4",

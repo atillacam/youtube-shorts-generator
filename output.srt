@@ -1,24 +1,28 @@
 1
-00:00:00,100 --> 00:00:06,050
-If you work in one of these three fields, your job is already gone and you do not even know it yet.
+00:00:00,100 --> 00:00:04,887
+Your job might already be on the chopping block, and you do not even know it.
 
 2
-00:00:06,000 --> 00:00:13,937
-Number three is graphic design, where AI is now generating award-winning artwork in literally zero point two seconds.
+00:00:04,837 --> 00:00:11,425
+First are translators, as real-time neural translation makes human fluency obsolete overnight.
 
 3
-00:00:13,937 --> 00:00:21,137
-Number two is customer support, as hyper-realistic voice bots are replacing entire call centers overnight.
+00:00:11,425 --> 00:00:19,187
+Second are copywriters, because AI now writes viral content, emails, and scripts in literal milliseconds.
 
 4
-00:00:21,137 --> 00:00:24,137
-But number one is the most terrifying.
+00:00:19,187 --> 00:00:22,312
+But the third one is the most terrifying.
 
 5
-00:00:24,137 --> 00:00:31,362
-It is entry-level coding, because AI is writing flawless software ten times faster than any human programmer.
+00:00:22,312 --> 00:00:29,875
+Financial analysts are being replaced by predictive algorithms that manage millions of dollars without making a single human error.
 
 6
-00:00:31,362 --> 00:00:39,300
-Are you brave enough to type your job title in the comments to see if AI is coming for you next, and hit subscribe before it is too late?
+00:00:29,875 --> 00:00:34,550
+Are you brave enough to drop your profession in the comments before AI takes it?
+
+7
+00:00:34,550 --> 00:00:38,175
+Subscribe right now if you want to survive the shift.
 

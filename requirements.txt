@@ -2,3 +2,4 @@ google-generativeai
 python-dotenv
 edge-tts
 moviepy
+requests
