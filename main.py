@@ -4,6 +4,7 @@ import re
 import textwrap
 import asyncio
 import urllib.request
+import urllib.parse
 import requests
 from dotenv import load_dotenv
 import google.generativeai as genai
@@ -13,6 +14,7 @@ import edge_tts
 try:
     from moviepy.editor import (
         VideoFileClip,
+        ImageClip,
         AudioFileClip,
         ColorClip,
         TextClip,
@@ -30,6 +32,7 @@ try:
 except ImportError:
     from moviepy import (
         VideoFileClip,
+        ImageClip,
         AudioFileClip,
         ColorClip,
         TextClip,
@@ -122,7 +125,7 @@ CRITICAL RULES:
 - Voiceover lines must contain ONLY spoken dialogue. Never include bracketed directions, emojis, asterisks, or sound effect markers inside Voiceover lines.
 - Keep sentences short (3-8 words per sentence). Speak with intensity and pace.
 - At the very end of your response, on a new line, add exactly:
-SEARCH_QUERY: [A single English word representing the core visual theme of the video to find matching background footage, e.g., robot, technology, city, hacker, money]
+SEARCH_QUERY: [A single English word representing the core visual theme to find matching background footage. You MUST choose a cinematic, atmospheric, or moody word that fits the topic (e.g., dark, horror, mystery, space, cyber, ancient, thriller, gold).]
 """
 
     candidate_models = ["gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-3.1-flash-lite"]
@@ -140,7 +143,7 @@ SEARCH_QUERY: [A single English word representing the core visual theme of the v
     raise RuntimeError(f"Senaryo üretilemedi: {last_error}")
 
 
-def extract_search_query(script: str, default: str = "technology") -> str:
+def extract_search_query(script: str, default: str = "dark") -> str:
     """Senaryonun altındaki SEARCH_QUERY etiketinden arka plan arama terimini ayıklar."""
     match = re.search(r"SEARCH_QUERY\s*:\s*\[?([a-zA-Z0-9_\-]+)\]?", script, re.IGNORECASE)
     if match:
@@ -160,7 +163,7 @@ def download_background_video(
     olarak indirir.
 
     Args:
-        query: İngilizce arama terimi (örn. 'technology', 'robot', 'city').
+        query: İngilizce arama terimi (örn. 'dark', 'mystery', 'horror', 'space').
         count: İndirilecek video sayısı (varsayılan: 3).
         output_prefix: Dosya adı öneki (varsayılan: 'bg').
 
@@ -190,10 +193,10 @@ def download_background_video(
         data = response.json()
         hits = data.get("hits", [])
 
-        # Eğer sorgu ile sonuç bulunamadıysa popüler genel bir sorgu ile dene
+        # Eğer sorgu ile sonuç bulunamadıysa atmosferik 'dark' sorgusu ile dene
         if not hits:
-            print(f"[Pixabay] '{clean_query}' için video bulunamadı. Genel 'technology' sorgusu deneniyor...")
-            params["q"] = "technology"
+            print(f"[Pixabay] '{clean_query}' için video bulunamadı. Genel atmosferik 'dark' sorgusu deneniyor...")
+            params["q"] = "dark"
             response = requests.get(api_url, params=params, timeout=15)
             data = response.json()
             hits = data.get("hits", [])
@@ -294,12 +297,12 @@ def download_background_video(
 def extract_voiceover(script: str) -> str:
     """Üretilen senaryo metninden yalnızca seslendirilecek kısımları (Voiceover) ayıklar.
 
-    'Visual:', 'Hook:', 'CTA:', 'SEARCH_QUERY:', 'Görsel:' gibi yönlendirmeleri, sahne açıklamalarını
+    'Visual:', 'Hook:', 'CTA:', 'SEARCH_QUERY:', 'IMAGE_PROMPT:', 'Görsel:' gibi yönlendirmeleri, sahne açıklamalarını
     ve zaman damgalarını sese dahil etmemek için temizler.
     """
     # 1. Aşama: 'Voiceover:' veya 'Seslendirme:' etiketli blokları yakala
     prefix = r"(?:^|\n)\s*(?:[-*•#\d\.\(\)]+\s*)?(?:\*\*|\*)?(?:Voiceover|Voice-over|Narration|Voice|Seslendirme|Dış\s*Ses|Ses|Metin)(?:\*\*|\*)?\s*:\s*"
-    delimiter = r"(?=(?:\n\s*(?:[-*•#\d\.\(\)]+\s*)?(?:\*\*|\*)?(?:Visual|Visuals|Scene|Video|Voiceover|Voice-over|Narration|Voice|Hook|Body|CTA|Call\s*to\s*Action|SEARCH_QUERY|Görsel|Seslendirme|Dış\s*Ses|Kanca|Gövde|Kapanış|Sahne|\d+[\.\)])|\Z))"
+    delimiter = r"(?=(?:\n\s*(?:[-*•#\d\.\(\)]+\s*)?(?:\*\*|\*)?(?:Visual|Visuals|Scene|Video|Voiceover|Voice-over|Narration|Voice|Hook|Body|CTA|Call\s*to\s*Action|SEARCH_QUERY|IMAGE_PROMPT|Image_Prompt|Image|Görsel|Seslendirme|Dış\s*Ses|Kanca|Gövde|Kapanış|Sahne|\d+[\.\)])|\Z))"
     pattern = prefix + r"(.*?)" + delimiter
 
     matches = re.findall(pattern, script, flags=re.IGNORECASE | re.DOTALL)
@@ -316,6 +319,7 @@ def extract_voiceover(script: str) -> str:
         ignore_prefixes = (
             "visual", "visuals", "scene", "video", "footage", "b-roll",
             "hook", "body", "cta", "call to action", "note:", "title:",
+            "search_query", "image_prompt", "image prompt", "image:", "image",
             "görsel", "kanca", "gövde", "kapanış", "sahne", "ekran", "not:"
         )
         for line in lines:
@@ -494,49 +498,110 @@ def split_cue_into_shorts_chunks(
     return sub_cues
 
 
+
 def create_subtitle_clips(
     subtitles: list[tuple[float, float, str]],
-    font_size: int = 88,
-) -> list[TextClip]:
+    font_size: int = 96,
+) -> list[CompositeVideoClip]:
     """Zaman damgalı altyazı listesini TikTok / YouTube Shorts dinamiklerine uygun olarak
-    SADECE 1 veya maksimum 2 kelimelik, büyük (font_size=88), kalın (Bold), beyaz ve 5px siyah konturlu
-    ultra dinamik TextClip nesnelerine dönüştürür.
+    SADECE 1 veya maksimum 2 kelimelik, tek satırda ortalanmış, agresif ve kalın (Impact / Arial-Bold),
+    kesinlikle BÜYÜK HARF (UPPERCASE), font_size=96 ve Drop Shadow (+6px kaydırılmış %80 opak siyah gölge)
+    efektine sahip CompositeVideoClip altyazı katmanlarına dönüştürür.
     """
     subtitle_clips = []
 
-    # Windows sistemindeki Arial Bold yazı tipi (kalın ve yüksek kontrastlı)
-    font_path = "C:/Windows/Fonts/arialbd.ttf" if os.path.exists("C:/Windows/Fonts/arialbd.ttf") else None
+    # Agresif ve kalın font seçimi: Sistemde varsa 'Impact', yoksa 'Arial-Bold'
+    if os.path.exists("C:/Windows/Fonts/impact.ttf"):
+        font_path = "C:/Windows/Fonts/impact.ttf"
+    elif os.path.exists("C:/Windows/Fonts/arialbd.ttf"):
+        font_path = "C:/Windows/Fonts/arialbd.ttf"
+    elif os.path.exists("C:/Windows/Fonts/arial.ttf"):
+        font_path = "C:/Windows/Fonts/arial.ttf"
+    else:
+        font_path = None
 
     for start_sec, end_sec, text in subtitles:
         # Metni SADECE 1 veya maksimum 2 kelimelik parçalara ayır
         chunks = split_cue_into_shorts_chunks(start_sec, end_sec, text, max_words=2)
 
         for c_start, c_end, c_text in chunks:
-            c_text_clean = c_text.strip()
+            # 1-2 kelimelik metni tek satırda tut ve KESİNLİKLE BÜYÜK HARF yap (text.upper())
+            c_text_clean = " ".join(c_text.strip().split()).upper()
             if not c_text_clean:
                 continue
 
             duration = max(0.04, c_end - c_start)
-            # Metni sar (1-2 kelime genellikle tek satır kalır)
-            wrapped = textwrap.fill(c_text_clean, width=16)
 
-            tc = (
-                TextClip(
-                    font=font_path,
-                    text=wrapped,
-                    font_size=font_size,
-                    color="white",
-                    stroke_color="black",
-                    stroke_width=5,
-                    text_align="center",
-                    horizontal_align="center",
-                    vertical_align="center",
-                    duration=duration,
-                )
-                .with_start(c_start)
-                .with_position(("center", 1080))  # Ekran ortasının hemen altı (Shorts safe zone)
+            # 1. Drop Shadow (Gölge) katmanı: Siyah, opacity=0.8, x ve y koordinatlarında +6 piksel kaydırılmış
+            shadow_clip = TextClip(
+                font=font_path,
+                text=c_text_clean,
+                font_size=font_size,
+                size=(960, None),
+                margin=(0, 20),
+                color="black",
+                method="caption",
+                text_align="center",
+                horizontal_align="center",
+                vertical_align="center",
+                interline=6,
+                duration=duration,
             )
-            subtitle_clips.append(tc)
+            if hasattr(shadow_clip, "with_opacity"):
+                shadow_clip = shadow_clip.with_opacity(0.8)
+            elif hasattr(shadow_clip, "set_opacity"):
+                shadow_clip = shadow_clip.set_opacity(0.8)
+
+            if hasattr(shadow_clip, "with_position"):
+                shadow_clip = shadow_clip.with_position((6, 6))
+            elif hasattr(shadow_clip, "set_position"):
+                shadow_clip = shadow_clip.set_position((6, 6))
+
+            # 2. Ana metin katmanı: Beyaz renk
+            main_clip = TextClip(
+                font=font_path,
+                text=c_text_clean,
+                font_size=font_size,
+                size=(960, None),
+                margin=(0, 20),
+                color="white",
+                method="caption",
+                text_align="center",
+                horizontal_align="center",
+                vertical_align="center",
+                interline=6,
+                duration=duration,
+            )
+            if hasattr(main_clip, "with_position"):
+                main_clip = main_clip.with_position((0, 0))
+            elif hasattr(main_clip, "set_position"):
+                main_clip = main_clip.set_position((0, 0))
+
+            w = max(main_clip.size[0], shadow_clip.size[0])
+            h = max(main_clip.size[1], shadow_clip.size[1])
+
+            # 3. İki TextClip katmanını CompositeVideoClip ile üst üste bindirerek gölgeli altyazı karesini oluştur
+            sub_comp = CompositeVideoClip(
+                [shadow_clip, main_clip],
+                size=(w + 12, h + 12),
+            )
+
+            if hasattr(sub_comp, "with_start"):
+                sub_comp = sub_comp.with_start(c_start)
+            elif hasattr(sub_comp, "set_start"):
+                sub_comp = sub_comp.set_start(c_start)
+
+            if hasattr(sub_comp, "with_duration"):
+                sub_comp = sub_comp.with_duration(duration)
+            elif hasattr(sub_comp, "set_duration"):
+                sub_comp = sub_comp.set_duration(duration)
+
+            if hasattr(sub_comp, "with_position"):
+                sub_comp = sub_comp.with_position(("center", 1080))
+            elif hasattr(sub_comp, "set_position"):
+                sub_comp = sub_comp.set_position(("center", 1080))
+
+            subtitle_clips.append(sub_comp)
 
     return subtitle_clips
 
@@ -601,23 +666,23 @@ def create_final_video(
     music_path: str = "bg_music.mp3",
     output_path: str = "final_shorts.mp4",
     fps: int = 24,
-    subtitle_font_size: int = 88,
+    subtitle_font_size: int = 96,
+    **kwargs,
 ) -> str:
-    """Arka plan videosunu (veya çoklu videoları), ana seslendirmeyi, dinamik arka plan müziğini (varsa)
-    ve stilize altyazıları birleştirerek 9:16 (1080x1920) formatında YouTube Shorts videosu oluşturur.
+    """Arka plan videolarını (Pixabay'den indirilen 3 video), ana seslendirmeyi,
+    dinamik arka plan müziğini (varsa) ve kalın, gölgeli agresif altyazıları birleştirerek
+    9:16 (1080x1920) formatında YouTube Shorts videosu oluşturur.
 
-    - Eğer `bg_paths` listesindeki videolar mevcutsa, her birini 1080x1920 (9:16) formatına dönüştürüp
-      `concatenate_videoclips` ile uç uca ekler.
-    - Hiçbir video yoksa, 1080x1920 boyutunda koyu renkli statik bir ColorClip oluşturur.
-    - `output.mp3` ses dosyasını yükler ve süresini ölçer.
-    - `bg_music.mp3` mevcutsa sesini %12 seviyesine kısar, video süresine göre keser veya döngüye alır
-      ve CompositeAudioClip ile ana seslendirmeyle birleştirir.
-    - Birleştirilmiş arka plan videosunu tam olarak ses süresine göre ayarlar (kırpma veya loop).
-    - Mikslenen sesi videoya entegre eder (with_audio / set_audio).
-    - `output.srt` (veya .vtt) dosyasından altyazıları okur ve ekranın ortasına stilize katman olarak ekler.
-    - CompositeVideoClip ile tüm katmanları birleştirir.
-    - Çıktıyı fps=24 ile `final_shorts.mp4` olarak kaydeder.
+    - İndirilen videoları VideoFileClip ile yükler ve concatenate_videoclips ile uç uca ekler.
+    - Videonun süresini tam olarak ses süresine göre ayarlar (kırpma veya döngü).
+    - bg_music.mp3 mevcutsa sesini %12 seviyesine kısarak miksler.
+    - Agresif, kalın (Impact / Arial-Bold), büyük harf ve drop shadow efektli altyazıları ekler.
+    - CompositeVideoClip ile 1080x1920 boyutunda render eder.
     """
+    if "bg_image_path" in kwargs and kwargs["bg_image_path"]:
+        val = kwargs["bg_image_path"]
+        bg_paths = [val] if isinstance(val, str) else val
+
     if not os.path.exists(audio_path):
         raise FileNotFoundError(f"Ses dosyası bulunamadı: {audio_path}")
 
@@ -747,7 +812,7 @@ def create_final_video(
     elif hasattr(video_clip, "set_duration"):
         video_clip = video_clip.set_duration(audio_duration)
 
-    # 4. Altyazıları oku ve stilize katmanlar olarak oluştur
+    # 4. Altyazıları oku ve kalın, agresif, gölgeli katmanlar olarak oluştur (Agresif Tipografi)
     layers = [video_clip]
     subtitle_clips = []
 
@@ -760,7 +825,7 @@ def create_final_video(
     if os.path.exists(sub_file_to_use):
         print(f"[Video Kurgu] Altyazı dosyası okunuyor: '{sub_file_to_use}'...")
         subtitles = parse_subtitles(sub_file_to_use)
-        print(f"[Video Kurgu] {len(subtitles)} altyazı bloğu bulundu. TikTok stili (1-2 kelimelik, font_size={subtitle_font_size}) stilize TextClip katmanları oluşturuluyor...")
+        print(f"[Video Kurgu] {len(subtitles)} altyazı bloğu bulundu. Agresif tipografi (UPPERCASE, font_size={subtitle_font_size}, Drop Shadow) altyazı katmanları oluşturuluyor...")
         subtitle_clips = create_subtitle_clips(subtitles, font_size=subtitle_font_size)
         layers.extend(subtitle_clips)
         print(f"[Video Kurgu] Toplam {len(subtitle_clips)} adet dinamik altyazı karesi hazırlandı.")
@@ -768,8 +833,8 @@ def create_final_video(
         print("[Video Kurgu] Uyarı: Altyazı dosyası bulunamadı, video altyazısız oluşturulacak.")
 
     # 5. CompositeVideoClip ile tüm katmanları birleştir
-    print("[Video Kurgu] CompositeVideoClip ile video ve altyazı katmanları birleştiriliyor...")
-    final_clip = CompositeVideoClip(layers)
+    print("[Video Kurgu] CompositeVideoClip ile video ve gölgeli altyazı katmanları birleştiriliyor...")
+    final_clip = CompositeVideoClip(layers, size=(1080, 1920))
     if hasattr(final_clip, "with_duration"):
         final_clip = final_clip.with_duration(audio_duration)
     elif hasattr(final_clip, "set_duration"):
@@ -814,18 +879,18 @@ def create_final_video(
 
 
 async def main():
-    test_topic = "The 3 most shocking jobs AI will replace first"
+    test_topic = "The FBI interrogation trick to spot a liar instantly"
     print(f"Generating viral Shorts script for: '{test_topic}'...\n")
 
     try:
-        # 1. Senaryoyu üret
+        # 1. Generate viral script
         script = generate_shorts_script(test_topic)
         print("=== 1. GENERATED VIRAL SHORTS SCRIPT (ENGLISH) ===")
         print(script)
         print("\n" + "=" * 40 + "\n")
 
-        # 2. Arka plan arama terimini ayıkla ve Pixabay'den 3 farklı video indir
-        search_query = extract_search_query(script, default="technology")
+        # 2. Extract background search query & download 3 Pixabay background clips
+        search_query = extract_search_query(script, default="dark")
         print("=== 2. PIXABAY MULTI-VIDEO BACKGROUND DOWNLOAD ===")
         print(f"Extracted search query: '{search_query}'")
         downloaded_bgs = download_background_video(search_query, count=3, output_prefix="bg")
@@ -835,16 +900,16 @@ async def main():
             print("Background videos could not be downloaded. Falling back to default background.")
         print("\n" + "=" * 40 + "\n")
 
-        # 3. Sadece seslendirilecek metni ayıkla
+        # 3. Extract spoken voiceover dialogue
         voiceover_text = extract_voiceover(script)
         print("=== 3. EXTRACTED VOICEOVER NARRATION ===")
         print(voiceover_text)
         print("\n" + "=" * 40 + "\n")
 
-        # 4. Metni Edge TTS + SubMaker ile ses ve altyazı olarak kaydet
+        # 4. Generate voiceover and time-synced subtitles via Edge TTS + SubMaker
         output_audio = "output.mp3"
         output_subtitle = "output.srt"
-        print(f"Generating voiceover and time-synced subtitles (Voice: en-US-ChristopherNeural)...")
+        print("Generating voiceover and time-synced subtitles (Voice: en-US-ChristopherNeural)...")
         await text_to_speech(
             voiceover_text,
             output_audio=output_audio,
@@ -853,7 +918,7 @@ async def main():
         )
         print(f"Success! Audio: '{output_audio}', Subtitles: '{output_subtitle}' & '{os.path.splitext(output_subtitle)[0]}.vtt'")
 
-        # 5. Altyazılı Video Kurgu, Ses Miksajı ve Birleştirme
+        # 5. Video Editing, Audio Mixing & Captions Compositing
         print("\n" + "=" * 40)
         print("=== 5. VIDEO EDITING, AUDIO MIXING & CAPTIONS COMPOSITING ===")
         create_final_video(
@@ -863,10 +928,11 @@ async def main():
             music_path="bg_music.mp3",
             output_path="final_shorts.mp4",
             fps=24,
+            subtitle_font_size=96,
         )
 
     except Exception as e:
-        print(f"Hata oluştu: {e}")
+        print(f"Error occurred: {e}")
 
 
 if __name__ == "__main__":
