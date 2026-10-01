@@ -1,13 +1,26 @@
 import os
 import sys
 import re
+import json
+import argparse
 import textwrap
 import asyncio
 import urllib.request
 import urllib.parse
 import requests
 from dotenv import load_dotenv
-import google.generativeai as genai
+
+# Google Gemini API desteği (hem yeni google-genai hem klasik google-generativeai uyumlu)
+try:
+    from google import genai
+    HAS_NEW_GENAI = True
+except ImportError:
+    HAS_NEW_GENAI = False
+    try:
+        import google.generativeai as genai
+    except ImportError:
+        genai = None
+
 import edge_tts
 
 # MoviePy importu (MoviePy 1.x ve 2.x sürümleriyle tam uyumlu)
@@ -89,19 +102,60 @@ load_dotenv()
 
 # Gemini API anahtarını al ve yapılandır
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
+if GEMINI_API_KEY and not HAS_NEW_GENAI and genai is not None:
+    try:
+        genai.configure(api_key=GEMINI_API_KEY)
+    except Exception:
+        pass
+
+
+def call_gemini(prompt: str, candidate_models: list[str] = None) -> str:
+    """Gemini API'ye istek gönderir (google-genai ve google-generativeai ile tam uyumlu)."""
+    if candidate_models is None:
+        candidate_models = ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-2.0-flash"]
+
+    if not GEMINI_API_KEY:
+        raise ValueError(
+            "GEMINI_API_KEY ortam değişkeni bulunamadı. Lütfen .env dosyasını doldurun."
+        )
+
+    last_error = None
+    if HAS_NEW_GENAI:
+        try:
+            client = genai.Client(api_key=GEMINI_API_KEY)
+            for model_name in candidate_models:
+                try:
+                    response = client.models.generate_content(
+                        model=model_name,
+                        contents=prompt,
+                    )
+                    if response and response.text:
+                        return response.text
+                except Exception as e:
+                    last_error = e
+                    continue
+        except Exception as e:
+            last_error = e
+    elif genai is not None:
+        for model_name in candidate_models:
+            try:
+                model = genai.GenerativeModel(model_name)
+                response = model.generate_content(prompt)
+                if response and response.text:
+                    return response.text
+            except Exception as e:
+                last_error = e
+                continue
+    else:
+        raise RuntimeError("Google GenAI kütüphanesi bulunamadı. Lütfen 'pip install google-genai' kurun.")
+
+    raise RuntimeError(f"Gemini API yanıt üretemedi: {last_error}")
 
 
 def generate_shorts_script(topic: str) -> str:
     """Verilen bir konu başlığından 30 saniyelik, viral potansiyeli yüksek
     bir YouTube Shorts senaryosu üretir.
     """
-    if not GEMINI_API_KEY:
-        raise ValueError(
-            "GEMINI_API_KEY ortam değişkeni bulunamadı. Lütfen .env dosyasını doldurun."
-        )
-
     prompt = f"""
 You are an elite viral content creator specializing in hyper-retention YouTube Shorts and TikToks.
 
@@ -127,20 +181,7 @@ CRITICAL RULES:
 - At the very end of your response, on a new line, add exactly:
 SEARCH_QUERY: [A single English word representing the core visual theme to find matching background footage. You MUST choose a cinematic, atmospheric, or moody word that fits the topic (e.g., dark, horror, mystery, space, cyber, ancient, thriller, gold).]
 """
-
-    candidate_models = ["gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-3.1-flash-lite"]
-    last_error = None
-    for model_name in candidate_models:
-        try:
-            model = genai.GenerativeModel(model_name)
-            response = model.generate_content(prompt)
-            if response and response.text:
-                return response.text
-        except Exception as e:
-            last_error = e
-            continue
-
-    raise RuntimeError(f"Senaryo üretilemedi: {last_error}")
+    return call_gemini(prompt)
 
 
 def extract_search_query(script: str, default: str = "dark") -> str:
@@ -878,58 +919,191 @@ def create_final_video(
     return output_path
 
 
+def generate_youtube_metadata(topic: str, script: str) -> dict:
+    """Üretilen senaryo için viral YouTube Shorts başlığı, açıklaması ve etiketlerini oluşturur."""
+    fallback_data = {
+        "title": f"{topic} #shorts",
+        "description": f"{topic}\n\n#shorts #viral #facts",
+        "tags": ["shorts", "viral", "facts", "ai", "trending"],
+    }
+    if not GEMINI_API_KEY:
+        return fallback_data
+
+    prompt = f"""
+You are an elite YouTube SEO specialist. Based on the topic and script below, generate viral YouTube Shorts metadata.
+
+Topic: {topic}
+Script:
+{script[:500]}
+
+Return STRICTLY a valid JSON object with the following keys and nothing else:
+{{
+  "title": "A short, viral, click-worthy YouTube title with #shorts under 60 characters",
+  "description": "An engaging 2-sentence description with 4-5 relevant hashtags",
+  "tags": ["tag1", "tag2", "tag3", "tag4", "tag5"]
+}}
+"""
+    try:
+        response_text = call_gemini(prompt)
+        cleaned = response_text.strip()
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```$", "", cleaned).strip()
+        return json.loads(cleaned)
+    except Exception:
+        return fallback_data
+
+
+def parse_arguments():
+    """Komut satırı argümanlarını ayrıştırır."""
+    parser = argparse.ArgumentParser(
+        description="🎬 AI YouTube Shorts & TikTok Generator - Automated Video Production Pipeline"
+    )
+    parser.add_argument(
+        "-t",
+        "--topic",
+        type=str,
+        default=None,
+        help="Video topic (e.g. 'The FBI interrogation trick to spot a liar instantly'). If omitted, prompts interactively.",
+    )
+    parser.add_argument(
+        "-v",
+        "--voice",
+        type=str,
+        default="en-US-ChristopherNeural",
+        help="Edge-TTS voice model (default: en-US-ChristopherNeural, e.g. en-GB-RyanNeural, en-US-GuyNeural, tr-TR-AhmetNeural).",
+    )
+    parser.add_argument(
+        "-c",
+        "--bg-count",
+        type=int,
+        default=3,
+        help="Number of background video clips to download from Pixabay (default: 3).",
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        type=str,
+        default="final_shorts.mp4",
+        help="Output video file path (default: final_shorts.mp4).",
+    )
+    parser.add_argument(
+        "-m",
+        "--music",
+        type=str,
+        default="bg_music.mp3",
+        help="Path to background music file (default: bg_music.mp3).",
+    )
+    parser.add_argument(
+        "--font-size",
+        type=int,
+        default=96,
+        help="Subtitle typography font size (default: 96).",
+    )
+    parser.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="Run without interactive prompt when topic is omitted, using default topic.",
+    )
+    return parser.parse_args()
+
+
 async def main():
-    test_topic = "The FBI interrogation trick to spot a liar instantly"
-    print(f"Generating viral Shorts script for: '{test_topic}'...\n")
+    args = parse_arguments()
+
+    topic = args.topic
+    default_topic = "The FBI interrogation trick to spot a liar instantly"
+
+    if not topic:
+        if args.non-interactive or not sys.stdin.isatty():
+            topic = default_topic
+            print(f"[CLI] Konu belirtilmedi, varsayılan konu seçildi: '{topic}'")
+        else:
+            try:
+                user_input = input(
+                    f"\n🎥 Shorts video konusunu girin (Varsayılan için Enter: '{default_topic}'): "
+                ).strip()
+                topic = user_input if user_input else default_topic
+            except (EOFError, KeyboardInterrupt):
+                topic = default_topic
+
+    print(f"\n{'=' * 60}")
+    print(f"🎬 AI YouTube Shorts Generator Başlatılıyor")
+    print(f"📌 Konu: '{topic}'")
+    print(f"🎙️ Ses Modeli: '{args.voice}'")
+    print(f"🎞️ Arka Plan Klip Sayısı: {args.bg_count}")
+    print(f"📁 Çıktı Dosyası: '{args.output}'")
+    print(f"{'=' * 60}\n")
 
     try:
         # 1. Generate viral script
-        script = generate_shorts_script(test_topic)
+        script = generate_shorts_script(topic)
         print("=== 1. GENERATED VIRAL SHORTS SCRIPT (ENGLISH) ===")
         print(script)
         print("\n" + "=" * 40 + "\n")
 
-        # 2. Extract background search query & download 3 Pixabay background clips
+        # 2. Generate YouTube SEO Metadata (Title, Description, Tags)
+        print("=== 2. GENERATING YOUTUBE SEO METADATA ===")
+        metadata = generate_youtube_metadata(topic, script)
+        meta_file = os.path.splitext(args.output)[0] + "_metadata.json"
+        with open(meta_file, "w", encoding="utf-8") as f_meta:
+            json.dump(metadata, f_meta, ensure_ascii=False, indent=2)
+        print(f"📌 Başlık: {metadata.get('title')}")
+        print(f"📝 Açıklama: {metadata.get('description')}")
+        print(f"🏷️ Etiketler: {', '.join(metadata.get('tags', []))}")
+        print(f"💾 Metadata kaydedildi: '{meta_file}'")
+        print("\n" + "=" * 40 + "\n")
+
+        # 3. Extract background search query & download Pixabay background clips
         search_query = extract_search_query(script, default="dark")
-        print("=== 2. PIXABAY MULTI-VIDEO BACKGROUND DOWNLOAD ===")
+        print("=== 3. PIXABAY MULTI-VIDEO BACKGROUND DOWNLOAD ===")
         print(f"Extracted search query: '{search_query}'")
-        downloaded_bgs = download_background_video(search_query, count=3, output_prefix="bg")
+        downloaded_bgs = download_background_video(
+            search_query, count=args.bg_count, output_prefix="bg"
+        )
         if downloaded_bgs:
-            print(f"Using {len(downloaded_bgs)} downloaded Pixabay background videos: {downloaded_bgs}")
+            print(
+                f"Using {len(downloaded_bgs)} downloaded Pixabay background videos: {downloaded_bgs}"
+            )
         else:
             print("Background videos could not be downloaded. Falling back to default background.")
         print("\n" + "=" * 40 + "\n")
 
-        # 3. Extract spoken voiceover dialogue
+        # 4. Extract spoken voiceover dialogue
         voiceover_text = extract_voiceover(script)
-        print("=== 3. EXTRACTED VOICEOVER NARRATION ===")
+        print("=== 4. EXTRACTED VOICEOVER NARRATION ===")
         print(voiceover_text)
         print("\n" + "=" * 40 + "\n")
 
-        # 4. Generate voiceover and time-synced subtitles via Edge TTS + SubMaker
+        # 5. Generate voiceover and time-synced subtitles via Edge TTS + SubMaker
         output_audio = "output.mp3"
         output_subtitle = "output.srt"
-        print("Generating voiceover and time-synced subtitles (Voice: en-US-ChristopherNeural)...")
+        print(f"Generating voiceover and time-synced subtitles (Voice: {args.voice})...")
         await text_to_speech(
             voiceover_text,
             output_audio=output_audio,
             output_subtitle=output_subtitle,
-            voice="en-US-ChristopherNeural",
+            voice=args.voice,
         )
-        print(f"Success! Audio: '{output_audio}', Subtitles: '{output_subtitle}' & '{os.path.splitext(output_subtitle)[0]}.vtt'")
+        print(
+            f"Success! Audio: '{output_audio}', Subtitles: '{output_subtitle}' & '{os.path.splitext(output_subtitle)[0]}.vtt'"
+        )
 
-        # 5. Video Editing, Audio Mixing & Captions Compositing
+        # 6. Video Editing, Audio Mixing & Captions Compositing
         print("\n" + "=" * 40)
-        print("=== 5. VIDEO EDITING, AUDIO MIXING & CAPTIONS COMPOSITING ===")
+        print("=== 6. VIDEO EDITING, AUDIO MIXING & CAPTIONS COMPOSITING ===")
         create_final_video(
             audio_path=output_audio,
             bg_paths=downloaded_bgs if downloaded_bgs else "background.mp4",
             subtitle_path=output_subtitle,
-            music_path="bg_music.mp3",
-            output_path="final_shorts.mp4",
+            music_path=args.music,
+            output_path=args.output,
             fps=24,
-            subtitle_font_size=96,
+            subtitle_font_size=args.font_size,
         )
+
+        print("\n🎉 Tüm süreç başarıyla tamamlandı!")
+        print(f"🎬 Video: {args.output}")
+        print(f"📋 YouTube Metadata: {meta_file}")
 
     except Exception as e:
         print(f"Error occurred: {e}")
