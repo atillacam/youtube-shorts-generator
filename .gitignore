@@ -1,5 +1,35 @@
+# Environment variables & secrets
 .env
-venv/
+*.env
+
+# Python build & bytecode
 __pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Output directories and generated video media
+outputs/
+final_shorts_metadata.json
 *.mp4
 *.mp3
+
+# Editor and OS temporary files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
