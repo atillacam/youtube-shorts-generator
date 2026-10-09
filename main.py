@@ -1,1041 +1,80 @@
-import os
+"""🎬 AI YouTube Shorts & TikTok Generator - Automated Video Production Pipeline.
+
+Main entry point and CLI runner.
+"""
+
 import sys
-import re
-import json
 import argparse
-import textwrap
 import asyncio
-import random
-import shutil
-from datetime import datetime
-import urllib.request
-import urllib.parse
-import requests
-from dotenv import load_dotenv
 
-# Google Gemini API desteği (hem yeni google-genai hem klasik google-generativeai uyumlu)
-try:
-    from google import genai
-    HAS_NEW_GENAI = True
-except ImportError:
-    HAS_NEW_GENAI = False
-    try:
-        import google.generativeai as genai
-    except ImportError:
-        genai = None
-
-import edge_tts
-
-# MoviePy importu (MoviePy 1.x ve 2.x sürümleriyle tam uyumlu)
-try:
-    from moviepy.editor import (
-        VideoFileClip,
-        ImageClip,
-        AudioFileClip,
-        ColorClip,
-        TextClip,
-        CompositeVideoClip,
-        CompositeAudioClip,
-        concatenate_videoclips,
-        vfx,
-        afx,
-    )
-    try:
-        from moviepy.audio.fx.all import volumex, audio_loop
-    except ImportError:
-        volumex = None
-        audio_loop = None
-except ImportError:
-    from moviepy import (
-        VideoFileClip,
-        ImageClip,
-        AudioFileClip,
-        ColorClip,
-        TextClip,
-        CompositeVideoClip,
-        CompositeAudioClip,
-        concatenate_videoclips,
-        vfx,
-        afx,
-    )
-    volumex = None
-    audio_loop = None
-
-
-def apply_audio_volume(clip, factor: float):
-    """MoviePy 1.x (volumex) ve 2.x (with_volume_scaled / MultiplyVolume) uyumlu ses seviyesi çarpanı."""
-    if volumex is not None:
-        try:
-            return volumex(clip, factor)
-        except Exception:
-            pass
-    if hasattr(clip, "with_volume_scaled"):
-        return clip.with_volume_scaled(factor)
-    elif hasattr(clip, "with_effects") and hasattr(afx, "MultiplyVolume"):
-        return clip.with_effects([afx.MultiplyVolume(factor)])
-    elif hasattr(clip, "volumex"):
-        return clip.volumex(factor)
-    return clip
-
-
-def apply_audio_loop(clip, target_duration: float):
-    """MoviePy 1.x (audio_loop) ve 2.x (AudioLoop) uyumlu ses döngüsü."""
-    if audio_loop is not None:
-        try:
-            return audio_loop(clip, duration=target_duration)
-        except Exception:
-            pass
-    if hasattr(clip, "with_effects") and hasattr(afx, "AudioLoop"):
-        return clip.with_effects([afx.AudioLoop(duration=target_duration)])
-    else:
-        from moviepy import concatenate_audioclips
-        n_loops = int(target_duration // clip.duration) + 1
-        looped = concatenate_audioclips([clip] * n_loops)
-        if hasattr(looped, "subclipped"):
-            return looped.subclipped(0, target_duration)
-        else:
-            return looped.subclip(0, target_duration)
-
-# Windows konsolunda UTF-8 karakterlerin düzgün görüntülenmesi için
-if sys.platform == "win32":
-    sys.stdout.reconfigure(encoding="utf-8")
-
-# .env dosyasındaki ortam değişkenlerini yükle
-load_dotenv()
-
-# Gemini API anahtarını al ve yapılandır
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-if GEMINI_API_KEY and not HAS_NEW_GENAI and genai is not None:
-    try:
-        genai.configure(api_key=GEMINI_API_KEY)
-    except Exception:
-        pass
-
-
-def call_gemini(prompt: str, candidate_models: list[str] = None) -> str:
-    """Gemini API'ye istek gönderir (google-genai ve google-generativeai ile tam uyumlu)."""
-    if candidate_models is None:
-        candidate_models = [
-            "gemini-3.5-flash",
-            "gemini-3.8-flash",
-            "gemini-3.7-flash",
-            "gemini-3.5-flash-lite",
-        ]
-
-    if not GEMINI_API_KEY:
-        raise ValueError(
-            "GEMINI_API_KEY ortam değişkeni bulunamadı. Lütfen .env dosyasını doldurun."
-        )
-
-    last_error = None
-    if HAS_NEW_GENAI:
-        try:
-            client = genai.Client(api_key=GEMINI_API_KEY)
-            for model_name in candidate_models:
-                try:
-                    response = client.models.generate_content(
-                        model=model_name,
-                        contents=prompt,
-                    )
-                    if response and response.text:
-                        return response.text
-                except Exception as e:
-                    last_error = e
-                    continue
-        except Exception as e:
-            last_error = e
-    elif genai is not None:
-        for model_name in candidate_models:
-            try:
-                model = genai.GenerativeModel(model_name)
-                response = model.generate_content(prompt)
-                if response and response.text:
-                    return response.text
-            except Exception as e:
-                last_error = e
-                continue
-    else:
-        raise RuntimeError("Google GenAI kütüphanesi bulunamadı. Lütfen 'pip install google-genai' kurun.")
-
-    raise RuntimeError(f"Gemini API yanıt üretemedi: {last_error}")
-
-
-def slugify_text(text: str) -> str:
-    """Türkçe karakterleri dönüştürerek dosya sistemine ve URL'lere uygun temiz slug üretir."""
-    tr_map = str.maketrans({
-        "ç": "c", "Ç": "c", "ğ": "g", "Ğ": "g", "ı": "i", "İ": "i",
-        "ö": "o", "Ö": "o", "ş": "s", "Ş": "s", "ü": "u", "Ü": "u"
-    })
-    cleaned = text.translate(tr_map).lower()
-    cleaned = re.sub(r"[^a-z0-9]+", "-", cleaned).strip("-")
-    return cleaned[:45] if cleaned else "shorts"
-
-
-def generate_shorts_script(topic: str) -> str:
-    """Verilen bir konu başlığından 30 saniyelik, viral potansiyeli yüksek
-    bir YouTube Shorts senaryosu ve 3 ana sahneye (Hook, Body, CTA) özel
-    İngilizce B-roll video arama terimleri üretir.
-    """
-    prompt = f"""
-You are an elite viral content creator specializing in hyper-retention YouTube Shorts and TikToks.
-
-Write the script entirely in English, keeping the tone aggressive, urgent, and mysterious. Do not include any Turkish words.
-
-Topic: {topic}
-
-Write the script using ultra-short, punchy sentences. Eliminate all filler words. Every single sentence must trigger curiosity. Keep the total spoken text around 60-75 words for a highly energetic, fast-paced 30-second delivery.
-
-The script MUST follow this exact 3-part structure:
-1. [0-3s] Hook: An electrifying, scroll-stopping statement or shocking question that violently grabs attention within the first 2 seconds. Make it bold, provocative, or alarming to shock the viewer.
-2. [3-25s] Body: 2-3 rapid-fire, jaw-dropping facts delivered with extreme momentum and zero fluff. Every word must hit hard.
-3. [25-30s] Call to Action (CTA): A sharp, psychological cliffhanger or controversial question demanding viewers to comment and subscribe before it is too late.
-
-For each section, you MUST strictly use this exact format:
-- Visual: [Brief description of fast-paced visual scene or footage]
-- Voiceover: [The exact words spoken by the narrator]
-
-CRITICAL RULES:
-- Write exclusively in English.
-- Voiceover lines must contain ONLY spoken dialogue. Never include bracketed directions, emojis, asterisks, or sound effect markers inside Voiceover lines.
-- Keep sentences short (3-8 words per sentence). Speak with intensity and pace.
-
-At the very end of your response, provide exactly 3 tailored English search queries for Pixabay video footage (one for each section: Hook, Body, CTA). Each query should consist of 2 to 4 highly visual, topic-specific keywords describing real footage (NOT generic words like just 'dark'):
-HOOK_QUERY: [2-4 English keywords for Hook visual, e.g. 'coding screen terminal' or 'shocked human face']
-BODY_QUERY: [2-4 English keywords for Body visual, e.g. 'artificial intelligence server' or 'matrix digital data']
-CTA_QUERY: [2-4 English keywords for CTA visual, e.g. 'futuristic robot cyberpunk' or 'countdown digital timer']
-"""
-    return call_gemini(prompt)
-
-
-def extract_scene_search_queries(script: str, topic: str = "") -> list[str]:
-    """Senaryodan 3 ana sahneye (Hook, Body, CTA) ait video arama terimlerini ayıklar.
-    Eski format (SEARCH_QUERY) veya eksik etiket durumunda akıllı geri dönüşler sağlar.
-    """
-    queries = []
-    for tag in ["HOOK_QUERY", "BODY_QUERY", "CTA_QUERY"]:
-        match = re.search(rf"{tag}\s*:\s*\[?([^\r\n\]]+)\]?", script, re.IGNORECASE)
-        if match:
-            clean_q = match.group(1).strip()
-            if clean_q:
-                queries.append(clean_q)
-
-    # Eğer 3 etiket bulunamadıysa tekli SEARCH_QUERY etiketini kontrol et
-    if len(queries) < 3:
-        m_single = re.search(r"SEARCH_QUERY\s*:\s*\[?([^\r\n\]]+)\]?", script, re.IGNORECASE)
-        if m_single:
-            base_q = m_single.group(1).strip()
-            while len(queries) < 3:
-                queries.append(base_q)
-
-    # Eğer hala eksikse konudan türetilen tematik terimleri ata
-    if not queries:
-        clean_topic = re.sub(r"[^a-zA-Z0-9\s]", " ", topic).strip()
-        words = [w for w in clean_topic.split() if len(w) > 3]
-        base = " ".join(words[:2]) if words else "technology"
-        queries = [f"{base} visual", f"{base} network", f"{base} cinematic"]
-
-    while len(queries) < 3:
-        queries.append(queries[-1] if queries else "cinematic technology")
-
-    return queries[:3]
-
-
-def extract_search_query(script: str, default: str = "technology") -> str:
-    """Geriye uyumluluk için tek arama terimi döndüren yardımcı fonksiyon."""
-    queries = extract_scene_search_queries(script)
-    return queries[0] if queries else default
-
-
-def download_scene_background_videos(
-    scene_queries: list[str],
-    output_dir: str = "backgrounds",
-    count: int = 3,
-) -> list[str]:
-    """Her sahne (Hook, Body, CTA) için konuya özel arama terimleriyle Pixabay Video API
-    üzerinden dikey (9:16 portrait) ve HD formatta arka plan videoları indirir.
-
-    Kliplerin birbirini tekrar etmemesi için kullanılan video ID'lerini takip eder,
-    en iyi aday havuzu arasından seçim yaparak zengin bir görsel çeşitlilik sağlar.
-    """
-    os.makedirs(output_dir, exist_ok=True)
-    api_key = os.getenv("PIXABAY_API_KEY")
-    if not api_key:
-        print("[Pixabay] Uyarı: PIXABAY_API_KEY ortam değişkeni bulunamadı (.env dosyasını kontrol edin).")
-        return []
-
-    scene_labels = ["hook", "body", "cta"]
-    downloaded_files = []
-    used_video_ids = set()
-
-    api_url = "https://pixabay.com/api/videos/"
-
-    print(f"\n[Pixabay] Sahne bazlı arka plan videoları aranıyor ({len(scene_queries)} sahne)...")
-
-    for i in range(count):
-        raw_query = scene_queries[i] if i < len(scene_queries) else scene_queries[-1]
-        scene_label = scene_labels[i] if i < len(scene_labels) else f"scene_{i+1}"
-        clean_query = re.sub(r"[^a-zA-Z0-9\s]", " ", raw_query).strip()
-
-        # Arama alternatifleri: tam sorgu -> ilk 2 kelime -> ilk kelime -> genel fallback
-        words = clean_query.split()
-        search_candidates = [clean_query]
-        if len(words) >= 3:
-            search_candidates.append(" ".join(words[:2]))
-        if len(words) >= 2:
-            search_candidates.append(words[0])
-        search_candidates.extend(["technology dark", "cinematic abstract", "dark atmosphere"])
-
-        hits = []
-        successful_query = ""
-        for q_attempt in search_candidates:
-            if not q_attempt.strip():
-                continue
-            try:
-                params = {
-                    "key": api_key,
-                    "q": q_attempt,
-                    "video_type": "film",
-                    "per_page": 20,
-                    "safesearch": "true",
-                }
-                resp = requests.get(api_url, params=params, timeout=12)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    candidate_hits = [h for h in data.get("hits", []) if h.get("id") not in used_video_ids]
-                    if candidate_hits:
-                        hits = candidate_hits
-                        successful_query = q_attempt
-                        break
-            except Exception as req_err:
-                print(f"[Pixabay] '{q_attempt}' sorgu hatası: {req_err}")
-                continue
-
-        if not hits:
-            print(f"[Pixabay] Sahne {i+1} ({scene_label.upper()}) için uygun video bulunamadı.")
-            continue
-
-        # Dikey (portrait: height > width) ve HD kalitedeki videoları puanla
-        def score_hit(h_item):
-            v_dict = h_item.get("videos", {})
-            v_info = v_dict.get("large") or v_dict.get("medium") or v_dict.get("small") or {}
-            w = v_info.get("width", 0)
-            h = v_info.get("height", 0)
-            is_vertical = 15 if h > w else 0
-            is_hd = 8 if (w >= 1080 or h >= 1080) else (4 if (w >= 720 or h >= 720) else 0)
-            return is_vertical + is_hd
-
-        sorted_hits = sorted(hits, key=score_hit, reverse=True)
-
-        # En iyi ilk 5 eşleşme arasından seçim yaparak aynı videoların sürekli tekrar etmesini önle
-        pool_size = min(5, len(sorted_hits))
-        top_pool = sorted_hits[:pool_size]
-        chosen_hit = random.choice(top_pool)
-        used_video_ids.add(chosen_hit.get("id"))
-
-        videos = chosen_hit.get("videos", {})
-        info = None
-        for q_name in ["large", "medium", "small"]:
-            candidate = videos.get(q_name)
-            if candidate and candidate.get("url"):
-                if q_name == "medium" and (candidate.get("width", 0) >= 720 or candidate.get("height", 0) >= 720):
-                    info = candidate
-                    break
-                if q_name == "large":
-                    if candidate.get("size", 0) > 35 * 1024 * 1024 and videos.get("medium"):
-                        info = videos.get("medium")
-                    else:
-                        info = candidate
-                    break
-        if not info or not info.get("url"):
-            info = videos.get("large") or videos.get("medium") or videos.get("small")
-
-        if not info or not info.get("url"):
-            continue
-
-        video_url = info["url"]
-        output_file = os.path.join(output_dir, f"scene_{i+1}_{scene_label}.mp4")
-
-        try:
-            w_curr = info.get("width", 0)
-            h_curr = info.get("height", 0)
-            orientation = "Dikey (Portrait)" if h_curr > w_curr else "Yatay (Landscape)"
-            print(f"[Pixabay] Sahne {i+1}/{count} [{scene_label.upper()} - '{successful_query}'] indiriliyor ({w_curr}x{h_curr} - {orientation})...")
-
-            downloaded = False
-            try:
-                r = requests.get(video_url, stream=True, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
-                if r.status_code == 200:
-                    with open(output_file, "wb") as f:
-                        for chunk in r.iter_content(chunk_size=65536):
-                            if chunk:
-                                f.write(chunk)
-                    downloaded = True
-            except Exception:
-                downloaded = False
-
-            if not downloaded:
-                req = urllib.request.Request(video_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
-                with urllib.request.urlopen(req) as resp, open(output_file, "wb") as f:
-                    while True:
-                        chunk = resp.read(65536)
-                        if not chunk:
-                            break
-                        f.write(chunk)
-                downloaded = True
-
-            if downloaded and os.path.exists(output_file) and os.path.getsize(output_file) > 1000:
-                size_mb = os.path.getsize(output_file) / (1024 * 1024)
-                print(f"[Pixabay] Başarılı! {output_file} kaydedildi ({size_mb:.2f} MB)")
-                downloaded_files.append(output_file)
-            else:
-                print(f"[Pixabay] Video indirilemedi: {output_file}")
-        except Exception as dl_err:
-            print(f"[Pixabay] Sahne {i+1} indirme hatası: {dl_err}")
-
-    print(f"[Pixabay] Toplam {len(downloaded_files)}/{count} sahne videosu başarıyla hazırlandı.")
-    return downloaded_files
-
-
-def download_background_video(
-    query: str,
-    count: int = 3,
-    output_prefix: str = "bg",
-) -> list[str]:
-    """Geriye uyumluluk sarmalayıcısı."""
-    return download_scene_background_videos([query] * count, output_dir=".", count=count)
-
-
-def extract_voiceover(script: str) -> str:
-    """Üretilen senaryo metninden yalnızca seslendirilecek kısımları (Voiceover) ayıklar.
-
-    'Visual:', 'Hook:', 'CTA:', 'SEARCH_QUERY:', 'IMAGE_PROMPT:', 'Görsel:' gibi yönlendirmeleri, sahne açıklamalarını
-    ve zaman damgalarını sese dahil etmemek için temizler.
-    """
-    # 1. Aşama: 'Voiceover:' veya 'Seslendirme:' etiketli blokları yakala
-    prefix = r"(?:^|\n)\s*(?:[-*•#\d\.\(\)]+\s*)?(?:\*\*|\*)?(?:Voiceover|Voice-over|Narration|Voice|Seslendirme|Dış\s*Ses|Ses|Metin)(?:\*\*|\*)?\s*:\s*"
-    delimiter = r"(?=(?:\n\s*(?:[-*•#\d\.\(\)]+\s*)?(?:\*\*|\*)?(?:Visual|Visuals|Scene|Video|Voiceover|Voice-over|Narration|Voice|Hook|Body|CTA|Call\s*to\s*Action|SEARCH_QUERY|IMAGE_PROMPT|Image_Prompt|Image|Görsel|Seslendirme|Dış\s*Ses|Kanca|Gövde|Kapanış|Sahne|\d+[\.\)])|\Z))"
-    pattern = prefix + r"(.*?)" + delimiter
-
-    matches = re.findall(pattern, script, flags=re.IGNORECASE | re.DOTALL)
-
-    voiceover_parts = []
-    for m in matches:
-        cleaned = m.strip()
-        if cleaned:
-            voiceover_parts.append(cleaned)
-
-    # 2. Aşama: Eğer özel etiketler bulunamadıysa satır bazlı filtreleme fallback'i uygula
-    if not voiceover_parts:
-        lines = script.splitlines()
-        ignore_prefixes = (
-            "visual", "visuals", "scene", "video", "footage", "b-roll",
-            "hook", "body", "cta", "call to action", "note:", "title:",
-            "search_query", "image_prompt", "image prompt", "image:", "image",
-            "görsel", "kanca", "gövde", "kapanış", "sahne", "ekran", "not:"
-        )
-        for line in lines:
-            stripped = line.strip()
-            if not stripped or stripped.startswith("#"):
-                continue
-            if re.match(r"^\[?\d+[-–]\d+\s*s[en]*\]?", stripped, re.IGNORECASE):
-                continue
-
-            cleaned_prefix = re.sub(r"^[\*\-\d\.\s\[\]]+", "", stripped).lower()
-            if any(cleaned_prefix.startswith(tag) for tag in ignore_prefixes):
-                continue
-
-            match_vo = re.match(r"^[\*\-\s]*(?:Voiceover|Voice-over|Narration|Voice|Seslendirme|Dış\s*Ses|Ses|Metin)\s*:\s*(.*)", stripped, re.IGNORECASE)
-            if match_vo:
-                voiceover_parts.append(match_vo.group(1).strip())
-            else:
-                voiceover_parts.append(stripped)
-
-    full_text = " ".join(voiceover_parts)
-
-    # Parantez içi veya köşeli parantez içi sahne yönlendirmelerini temizle
-    full_text = re.sub(r"[\(\[][^\)\]]*(?:camera|visual|zoom|effect|sfx|music|sound effect|smile|cut|scene|b-roll|footage|kamera|görsel|zoom|efekt|müzik|ses efekti|gülümse|kesme|sahne)[^\)\]]*[\)\]]", "", full_text, flags=re.IGNORECASE)
-    # Kalan markdown işaretlerini (*, _, #, `) ve gereksiz boşlukları temizle
-    full_text = re.sub(r"[\*_#`]", "", full_text)
-    full_text = re.sub(r"\s+", " ", full_text).strip()
-
-    return full_text
-
-
-def srt_to_vtt(srt_content: str) -> str:
-    """SRT biçimindeki altyazı içeriğini standart WebVTT formatına dönüştürür."""
-    vtt_lines = ["WEBVTT\n"]
-    for line in srt_content.strip().splitlines():
-        if "-->" in line:
-            vtt_lines.append(line.replace(",", "."))
-        else:
-            vtt_lines.append(line)
-    return "\n".join(vtt_lines) + "\n"
-
-
-async def text_to_speech(
-    text: str, 
-    output_audio: str = "output.mp3", 
-    output_subtitle: str = "output.srt",
-    voice: str = "en-US-ChristopherNeural",
-) -> tuple[str, str]:
-    """Verilen metni Edge TTS kullanarak yüksek kaliteli bir ses dosyasına (mp3)
-    ve SubMaker modülüyle sesle birebir zaman uyumlu altyazı dosyalarına (.srt ve .vtt) dönüştürür.
-    
-    Args:
-        text: Seslendirilecek metin.
-        output_audio: Ses dosyası çıktı yolu (varsayılan: output.mp3).
-        output_subtitle: Altyazı dosyası çıktı yolu (varsayılan: output.srt).
-        voice: Kullanılacak ses modeli (varsayılan: en-US-ChristopherNeural, alternatif: en-GB-RyanNeural).
-        
-    Returns:
-        tuple[str, str]: (output_audio, output_subtitle) yolları.
-    """
-    if not text.strip():
-        raise ValueError("Seslendirilecek metin bulunamadı!")
-
-    communicate = edge_tts.Communicate(text, voice)
-    submaker = edge_tts.SubMaker()
-
-    with open(output_audio, "wb") as f_audio:
-        async for chunk in communicate.stream():
-            if chunk["type"] == "audio":
-                f_audio.write(chunk["data"])
-            elif chunk["type"] in ("WordBoundary", "SentenceBoundary"):
-                submaker.feed(chunk)
-
-    srt_content = submaker.get_srt()
-    with open(output_subtitle, "w", encoding="utf-8") as f_sub:
-        f_sub.write(srt_content)
-
-    # İstenen .vtt formatını da aynı içerikle kaydet
-    vtt_path = os.path.splitext(output_subtitle)[0] + ".vtt"
-    with open(vtt_path, "w", encoding="utf-8") as f_vtt:
-        f_vtt.write(srt_to_vtt(srt_content))
-
-    return output_audio, output_subtitle
-
-
-def parse_subtitles(file_path: str) -> list[tuple[float, float, str]]:
-    """SRT veya VTT dosyasını ayrıştırarak (başlangıç_sn, bitiş_sn, metin) listesi döndürür."""
-    if not os.path.exists(file_path):
-        return []
-
-    with open(file_path, "r", encoding="utf-8") as f:
-        content = f.read()
-
-    blocks = re.split(r"\n\s*\n", content.strip())
-    subtitles = []
-
-    for block in blocks:
-        lines = [line.strip() for line in block.strip().splitlines() if line.strip()]
-        if len(lines) < 2:
-            continue
-
-        time_match = None
-        text_lines = []
-        for line in lines:
-            m = re.match(
-                r"(\d{2}):(\d{2}):(\d{2})[,.](\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})[,.](\d{3})",
-                line,
-            )
-            if m:
-                time_match = m
-            elif time_match:
-                text_lines.append(line)
-
-        if time_match and text_lines:
-            h1, m1, s1, ms1, h2, m2, s2, ms2 = [int(x) for x in time_match.groups()]
-            start_sec = h1 * 3600 + m1 * 60 + s1 + ms1 / 1000.0
-            end_sec = h2 * 3600 + m2 * 60 + s2 + ms2 / 1000.0
-            text = " ".join(text_lines).strip()
-            if text and end_sec > start_sec:
-                subtitles.append((start_sec, end_sec, text))
-
-    return subtitles
-
-
-def split_cue_into_shorts_chunks(
-    start: float, end: float, text: str, max_words: int = 2
-) -> list[tuple[float, float, str]]:
-    """Metni TikTok / YouTube Shorts stiline uygun olarak SADECE 1 veya maksimum 2 kelimelik
-    çok kısa ve dinamik parçalara böler, süreleri kelime uzunluklarına göre hassas dağıtır.
-    """
-    words = text.split()
-    if not words:
-        return []
-
-    # Eğer zaten 1 veya 2 kelimeden oluşuyorsa doğrudan döndür
-    if len(words) <= max_words:
-        return [(start, end, text.strip())]
-
-    # Kelimeleri SADECE 1 veya maksimum 2 kelimelik parçalara ayır
-    # Noktalama işaretlerine ve konuşma duraklamalarına saygı göster
-    chunks = []
-    i = 0
-    while i < len(words):
-        w1 = words[i]
-        if i + 1 >= len(words):
-            chunks.append([w1])
-            i += 1
-        else:
-            w2 = words[i + 1]
-            # w1 noktalama işaretiyle bitiyorsa (virgül, nokta vb.), duraklama için tek kelime yap
-            if any(w1.endswith(p) for p in [".", ",", "!", "?", ":", ";", "—", "-"]):
-                chunks.append([w1])
-                i += 1
-            else:
-                chunks.append([w1, w2])
-                i += 2
-
-    # Her parçanın karakter uzunluğuna göre süreyi orantısal olarak dağıt
-    total_chars = sum(len(w) for w in words)
-    duration = end - start
-
-    sub_cues = []
-    cur_start = start
-    for idx, chk in enumerate(chunks):
-        chk_text = " ".join(chk).strip()
-        chk_chars = sum(len(w) for w in chk)
-        if idx == len(chunks) - 1:
-            chk_end = end
-        else:
-            chk_duration = duration * (chk_chars / total_chars)
-            chk_end = cur_start + chk_duration
-
-        if chk_end > cur_start:
-            sub_cues.append((cur_start, chk_end, chk_text))
-        cur_start = chk_end
-
-    return sub_cues
-
-
-
-def create_subtitle_clips(
-    subtitles: list[tuple[float, float, str]],
-    font_size: int = 96,
-) -> list[CompositeVideoClip]:
-    """Zaman damgalı altyazı listesini TikTok / YouTube Shorts dinamiklerine uygun olarak
-    SADECE 1 veya maksimum 2 kelimelik, tek satırda ortalanmış, agresif ve kalın (Impact / Arial-Bold),
-    kesinlikle BÜYÜK HARF (UPPERCASE), font_size=96 ve Drop Shadow (+6px kaydırılmış %80 opak siyah gölge)
-    efektine sahip CompositeVideoClip altyazı katmanlarına dönüştürür.
-    """
-    subtitle_clips = []
-
-    # Agresif ve kalın font seçimi: Sistemde varsa 'Impact', yoksa 'Arial-Bold'
-    if os.path.exists("C:/Windows/Fonts/impact.ttf"):
-        font_path = "C:/Windows/Fonts/impact.ttf"
-    elif os.path.exists("C:/Windows/Fonts/arialbd.ttf"):
-        font_path = "C:/Windows/Fonts/arialbd.ttf"
-    elif os.path.exists("C:/Windows/Fonts/arial.ttf"):
-        font_path = "C:/Windows/Fonts/arial.ttf"
-    else:
-        font_path = None
-
-    for start_sec, end_sec, text in subtitles:
-        # Metni SADECE 1 veya maksimum 2 kelimelik parçalara ayır
-        chunks = split_cue_into_shorts_chunks(start_sec, end_sec, text, max_words=2)
-
-        for c_start, c_end, c_text in chunks:
-            # 1-2 kelimelik metni tek satırda tut ve KESİNLİKLE BÜYÜK HARF yap (text.upper())
-            c_text_clean = " ".join(c_text.strip().split()).upper()
-            if not c_text_clean:
-                continue
-
-            duration = max(0.04, c_end - c_start)
-
-            # 1. Drop Shadow (Gölge) katmanı: Siyah, opacity=0.8, x ve y koordinatlarında +6 piksel kaydırılmış
-            shadow_clip = TextClip(
-                font=font_path,
-                text=c_text_clean,
-                font_size=font_size,
-                size=(960, None),
-                margin=(0, 20),
-                color="black",
-                method="caption",
-                text_align="center",
-                horizontal_align="center",
-                vertical_align="center",
-                interline=6,
-                duration=duration,
-            )
-            if hasattr(shadow_clip, "with_opacity"):
-                shadow_clip = shadow_clip.with_opacity(0.8)
-            elif hasattr(shadow_clip, "set_opacity"):
-                shadow_clip = shadow_clip.set_opacity(0.8)
-
-            if hasattr(shadow_clip, "with_position"):
-                shadow_clip = shadow_clip.with_position((6, 6))
-            elif hasattr(shadow_clip, "set_position"):
-                shadow_clip = shadow_clip.set_position((6, 6))
-
-            # 2. Ana metin katmanı: Beyaz renk
-            main_clip = TextClip(
-                font=font_path,
-                text=c_text_clean,
-                font_size=font_size,
-                size=(960, None),
-                margin=(0, 20),
-                color="white",
-                method="caption",
-                text_align="center",
-                horizontal_align="center",
-                vertical_align="center",
-                interline=6,
-                duration=duration,
-            )
-            if hasattr(main_clip, "with_position"):
-                main_clip = main_clip.with_position((0, 0))
-            elif hasattr(main_clip, "set_position"):
-                main_clip = main_clip.set_position((0, 0))
-
-            w = max(main_clip.size[0], shadow_clip.size[0])
-            h = max(main_clip.size[1], shadow_clip.size[1])
-
-            # 3. İki TextClip katmanını CompositeVideoClip ile üst üste bindirerek gölgeli altyazı karesini oluştur
-            sub_comp = CompositeVideoClip(
-                [shadow_clip, main_clip],
-                size=(w + 12, h + 12),
-            )
-
-            if hasattr(sub_comp, "with_start"):
-                sub_comp = sub_comp.with_start(c_start)
-            elif hasattr(sub_comp, "set_start"):
-                sub_comp = sub_comp.set_start(c_start)
-
-            if hasattr(sub_comp, "with_duration"):
-                sub_comp = sub_comp.with_duration(duration)
-            elif hasattr(sub_comp, "set_duration"):
-                sub_comp = sub_comp.set_duration(duration)
-
-            if hasattr(sub_comp, "with_position"):
-                sub_comp = sub_comp.with_position(("center", 1080))
-            elif hasattr(sub_comp, "set_position"):
-                sub_comp = sub_comp.set_position(("center", 1080))
-
-            subtitle_clips.append(sub_comp)
-
-    return subtitle_clips
-
-
-def ensure_vertical_aspect_ratio(clip, target_w: int = 1080, target_h: int = 1920):
-    """Herhangi bir en-boy oranındaki videoyu 9:16 (1080x1920) dikey formata
-    bozulma ve esneme olmadan (merkezden kırparak) dönüştürür.
-    """
-    w, h = clip.size
-    if (w, h) == (target_w, target_h):
-        return clip
-
-    target_ratio = target_w / target_h
-    current_ratio = w / h
-
-    if current_ratio > target_ratio:
-        # Video daha geniş -> Yüksekliği 1920'ye ayarla, genişliği merkezden 1080'e kırp
-        new_w = int(w * (target_h / h))
-        if hasattr(clip, "resized"):
-            scaled = clip.resized(height=target_h)
-            x_center = scaled.size[0] / 2
-            return scaled.cropped(
-                x1=x_center - target_w / 2,
-                x2=x_center + target_w / 2,
-                y1=0,
-                y2=target_h,
-            )
-        else:
-            scaled = clip.resize(height=target_h)
-            return scaled.crop(
-                x_center=scaled.size[0] / 2,
-                y_center=target_h / 2,
-                width=target_w,
-                height=target_h,
-            )
-    else:
-        # Video daha dar -> Genişliği 1080'e ayarla, yüksekliği merkezden 1920'ye kırp
-        new_h = int(h * (target_w / w))
-        if hasattr(clip, "resized"):
-            scaled = clip.resized(width=target_w)
-            y_center = scaled.size[1] / 2
-            return scaled.cropped(
-                x1=0,
-                x2=target_w,
-                y1=y_center - target_h / 2,
-                y2=y_center + target_h / 2,
-            )
-        else:
-            scaled = clip.resize(width=target_w)
-            return scaled.crop(
-                x_center=target_w / 2,
-                y_center=scaled.size[1] / 2,
-                width=target_w,
-                height=target_h,
-            )
-
-
-def create_final_video(
-    audio_path: str = "output.mp3",
-    bg_paths: list[str] | str = None,
-    subtitle_path: str = "output.srt",
-    music_path: str = "bg_music.mp3",
-    output_path: str = "final_shorts.mp4",
-    fps: int = 24,
-    subtitle_font_size: int = 96,
-    **kwargs,
-) -> str:
-    """Arka plan videolarını (Pixabay'den indirilen 3 video), ana seslendirmeyi,
-    dinamik arka plan müziğini (varsa) ve kalın, gölgeli agresif altyazıları birleştirerek
-    9:16 (1080x1920) formatında YouTube Shorts videosu oluşturur.
-
-    - İndirilen videoları VideoFileClip ile yükler ve concatenate_videoclips ile uç uca ekler.
-    - Videonun süresini tam olarak ses süresine göre ayarlar (kırpma veya döngü).
-    - bg_music.mp3 mevcutsa sesini %12 seviyesine kısarak miksler.
-    - Agresif, kalın (Impact / Arial-Bold), büyük harf ve drop shadow efektli altyazıları ekler.
-    - CompositeVideoClip ile 1080x1920 boyutunda render eder.
-    """
-    if "bg_image_path" in kwargs and kwargs["bg_image_path"]:
-        val = kwargs["bg_image_path"]
-        bg_paths = [val] if isinstance(val, str) else val
-
-    if not os.path.exists(audio_path):
-        raise FileNotFoundError(f"Ses dosyası bulunamadı: {audio_path}")
-
-    print(f"\n[Video Kurgu] '{audio_path}' yükleniyor...")
-    voiceover_clip = AudioFileClip(audio_path)
-    audio_duration = voiceover_clip.duration
-    print(f"[Video Kurgu] Ana seslendirme süresi: {audio_duration:.2f} saniye")
-
-    # 1. Ses Miksajı (Audio Mixing) - Arka plan müziği kontrolü
-    audio_clips_to_close = [voiceover_clip]
-    final_audio = voiceover_clip
-
-    if os.path.exists(music_path):
-        try:
-            print(f"[Ses Miksajı] Arka plan müziği bulundu: '{music_path}'")
-            music_clip = AudioFileClip(music_path)
-            audio_clips_to_close.append(music_clip)
-            music_duration = music_clip.duration
-            print(f"[Ses Miksajı] Orijinal müzik süresi: {music_duration:.2f} saniye")
-
-            # Müzik sesini ana sesi bastırmayacak şekilde (%12) kıs
-            print("[Ses Miksajı] Müzik ses seviyesi kısılıyor (%12)...")
-            music_clip = apply_audio_volume(music_clip, 0.12)
-
-            # Müziğin süresini videoya eşitle (uzunsa kes, kısaysa döngüye al)
-            if music_duration >= audio_duration:
-                print("[Ses Miksajı] Müzik sesten uzun, video süresine göre kesiliyor...")
-                if hasattr(music_clip, "subclipped"):
-                    music_clip = music_clip.subclipped(0, audio_duration)
-                else:
-                    music_clip = music_clip.subclip(0, audio_duration)
-            else:
-                print("[Ses Miksajı] Müzik sesten kısa, video bitene kadar döngüye alınıyor...")
-                music_clip = apply_audio_loop(music_clip, audio_duration)
-
-            # CompositeAudioClip ile ana seslendirme ve arka plan müziğini birleştir
-            print("[Ses Miksajı] CompositeAudioClip ile ana seslendirme ve müzik birleştiriliyor...")
-            composite_audio = CompositeAudioClip([voiceover_clip, music_clip])
-            if hasattr(composite_audio, "with_duration"):
-                composite_audio = composite_audio.with_duration(audio_duration)
-            elif hasattr(composite_audio, "set_duration"):
-                composite_audio = composite_audio.set_duration(audio_duration)
-
-            final_audio = composite_audio
-            audio_clips_to_close.append(final_audio)
-            print("[Ses Miksajı] Ses miksajı başarıyla tamamlandı!")
-
-        except Exception as music_err:
-            print(f"[Ses Miksajı] Uyarı: Müzik işlenirken hata oluştu ({music_err}). Yalnızca ana seslendirme kullanılacak.")
-            final_audio = voiceover_clip
-    else:
-        print(f"[Ses Miksajı] '{music_path}' bulunamadı. Sadece ana seslendirme (Voiceover) kullanılacak.")
-
-    # 2. Arka plan kontrolü ve çoklu video birleştirme (Multi-Video Concatenation)
-    if isinstance(bg_paths, str):
-        candidate_bg_files = [bg_paths]
-    elif isinstance(bg_paths, list):
-        candidate_bg_files = bg_paths
-    else:
-        candidate_bg_files = ["bg_1.mp4", "bg_2.mp4", "bg_3.mp4", "background.mp4"]
-
-    valid_bg_files = [f for f in candidate_bg_files if os.path.exists(f)]
-    loaded_clips = []
-
-    if valid_bg_files:
-        print(f"[Video Kurgu] {len(valid_bg_files)} adet arka plan videosu bulundu: {valid_bg_files}")
-        for video_path in valid_bg_files:
-            try:
-                clip = VideoFileClip(video_path)
-                # Her bir videoyu 1080x1920 (9:16) formatına dönüştür
-                clip = ensure_vertical_aspect_ratio(clip, 1080, 1920)
-                loaded_clips.append(clip)
-                print(f"[Video Kurgu] Video klip eklendi: '{video_path}' (Süre: {clip.duration:.2f}s)")
-            except Exception as e:
-                print(f"[Video Kurgu] Uyarı: '{video_path}' yüklenemedi ({e}). Diğer kliplerle devam ediliyor.")
-
-    allocated_subclips = []
-    if loaded_clips:
-        num_clips = len(loaded_clips)
-        target_slice = audio_duration / num_clips
-        print(f"[Video Kurgu] {num_clips} adet sahne arka plan klibi video süresine göre dengeli paylaştırılıyor (~{target_slice:.2f}s her klip)...")
-
-        for idx, clip in enumerate(loaded_clips):
-            # Son klip olası yuvarlama farkını dengeler
-            cur_target = target_slice if idx < num_clips - 1 else (audio_duration - (target_slice * (num_clips - 1)))
-            cur_target = max(0.5, cur_target)
-
-            if clip.duration >= cur_target:
-                c_slice = clip.subclipped(0, cur_target) if hasattr(clip, "subclipped") else clip.subclip(0, cur_target)
-            else:
-                n_loops = int(cur_target // clip.duration) + 1
-                looped = concatenate_videoclips([clip] * n_loops)
-                c_slice = looped.subclipped(0, cur_target) if hasattr(looped, "subclipped") else looped.subclip(0, cur_target)
-            allocated_subclips.append(c_slice)
-
-        try:
-            if len(allocated_subclips) > 1:
-                video_clip = concatenate_videoclips(allocated_subclips)
-            else:
-                video_clip = allocated_subclips[0]
-        except Exception as concat_err:
-            print(f"[Video Kurgu] Klipler birleştirilirken hata oluştu ({concat_err}). İlk geçerli klip kullanılıyor...")
-            video_clip = loaded_clips[0]
-            if video_clip.duration >= audio_duration:
-                video_clip = video_clip.subclipped(0, audio_duration) if hasattr(video_clip, "subclipped") else video_clip.subclip(0, audio_duration)
-            else:
-                n_loops = int(audio_duration // video_clip.duration) + 1
-                looped = concatenate_videoclips([video_clip] * n_loops)
-                video_clip = looped.subclipped(0, audio_duration) if hasattr(looped, "subclipped") else looped.subclip(0, audio_duration)
-    else:
-        print("[Video Kurgu] Arka plan videosu bulunamadı. 1080x1920 koyu renkli statik ColorClip oluşturuluyor...")
-        video_clip = ColorClip(
-            size=(1080, 1920),
-            color=(20, 24, 33),
-            duration=audio_duration,
-        )
-
-    # 3. Mikslenen sesi videoya entegre et
-    print("[Video Kurgu] Mikslenen ses arka plan videosuna entegre ediliyor...")
-    if hasattr(video_clip, "with_audio"):
-        video_clip = video_clip.with_audio(final_audio)
-    elif hasattr(video_clip, "set_audio"):
-        video_clip = video_clip.set_audio(final_audio)
-
-    if hasattr(video_clip, "with_duration"):
-        video_clip = video_clip.with_duration(audio_duration)
-    elif hasattr(video_clip, "set_duration"):
-        video_clip = video_clip.set_duration(audio_duration)
-
-    # 4. Altyazıları oku ve kalın, agresif, gölgeli katmanlar olarak oluştur (Agresif Tipografi)
-    layers = [video_clip]
-    subtitle_clips = []
-
-    sub_file_to_use = subtitle_path
-    if not os.path.exists(sub_file_to_use):
-        vtt_alt = os.path.splitext(subtitle_path)[0] + ".vtt"
-        if os.path.exists(vtt_alt):
-            sub_file_to_use = vtt_alt
-
-    if os.path.exists(sub_file_to_use):
-        print(f"[Video Kurgu] Altyazı dosyası okunuyor: '{sub_file_to_use}'...")
-        subtitles = parse_subtitles(sub_file_to_use)
-        print(f"[Video Kurgu] {len(subtitles)} altyazı bloğu bulundu. Agresif tipografi (UPPERCASE, font_size={subtitle_font_size}, Drop Shadow) altyazı katmanları oluşturuluyor...")
-        subtitle_clips = create_subtitle_clips(subtitles, font_size=subtitle_font_size)
-        layers.extend(subtitle_clips)
-        print(f"[Video Kurgu] Toplam {len(subtitle_clips)} adet dinamik altyazı karesi hazırlandı.")
-    else:
-        print("[Video Kurgu] Uyarı: Altyazı dosyası bulunamadı, video altyazısız oluşturulacak.")
-
-    # 5. CompositeVideoClip ile tüm katmanları birleştir
-    print("[Video Kurgu] CompositeVideoClip ile video ve gölgeli altyazı katmanları birleştiriliyor...")
-    final_clip = CompositeVideoClip(layers, size=(1080, 1920))
-    if hasattr(final_clip, "with_duration"):
-        final_clip = final_clip.with_duration(audio_duration)
-    elif hasattr(final_clip, "set_duration"):
-        final_clip = final_clip.set_duration(audio_duration)
-
-    # 6. Nihai çıktıyı fps=24 ile kaydet
-    print(f"[Video Kurgu] Nihai video render ediliyor: '{output_path}' (fps={fps})...")
-    final_clip.write_videofile(
-        output_path,
-        fps=fps,
-        codec="libx264",
-        audio_codec="aac",
-    )
-
-    # Kaynakları serbest bırak
-    for sc in subtitle_clips:
-        try:
-            sc.close()
-        except Exception:
-            pass
-    for ac in audio_clips_to_close:
-        try:
-            ac.close()
-        except Exception:
-            pass
-    for lc in loaded_clips:
-        try:
-            lc.close()
-        except Exception:
-            pass
-    for asc in allocated_subclips:
-        try:
-            asc.close()
-        except Exception:
-            pass
-    try:
-        video_clip.close()
-    except Exception:
-        pass
-    try:
-        final_clip.close()
-    except Exception:
-        pass
-
-    print(f"[Video Kurgu] Başarılı! Nihai video oluşturuldu: {output_path}")
-    return output_path
-
-
-def generate_youtube_metadata(topic: str, script: str) -> dict:
-    """Üretilen senaryo için viral YouTube Shorts başlığı, açıklaması ve etiketlerini oluşturur."""
-    fallback_data = {
-        "title": f"{topic} #shorts",
-        "description": f"{topic}\n\n#shorts #viral #facts",
-        "tags": ["shorts", "viral", "facts", "ai", "trending"],
-    }
-    if not GEMINI_API_KEY:
-        return fallback_data
-
-    prompt = f"""
-You are an elite YouTube SEO specialist. Based on the topic and script below, generate viral YouTube Shorts metadata.
-
-Topic: {topic}
-Script:
-{script[:500]}
-
-Rules:
-- The title, description, and tags MUST be written in English to match the English voiceover.
-- Title must be high CTR, curiosity-inducing, under 60 characters, and end with #shorts.
-- Description must be 2 punchy sentences with 4-5 relevant hashtags.
-- Tags must be 5-8 hyper-relevant search tags.
-
-Return STRICTLY a valid JSON object with the following keys and nothing else:
-{{
-  "title": "A short, viral, click-worthy YouTube title with #shorts under 60 characters",
-  "description": "An engaging 2-sentence description with 4-5 relevant hashtags",
-  "tags": ["tag1", "tag2", "tag3", "tag4", "tag5"]
-}}
-"""
-    try:
-        response_text = call_gemini(prompt)
-        cleaned = response_text.strip()
-        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
-        cleaned = re.sub(r"\s*```$", "", cleaned).strip()
-        return json.loads(cleaned)
-    except Exception:
-        return fallback_data
-
-
-def parse_arguments():
-    """Komut satırı argümanlarını ayrıştırır."""
+# Expose all core functions at root module level for complete backward compatibility
+from src.shorts_generator.config import (
+    DEFAULT_VOICE,
+    DEFAULT_BG_COUNT,
+    DEFAULT_OUTPUT_FILENAME,
+    DEFAULT_BG_MUSIC,
+    DEFAULT_FONT_SIZE,
+    DEFAULT_FPS,
+    GEMINI_API_KEY,
+    PIXABAY_API_KEY,
+)
+from src.shorts_generator.utils import (
+    slugify_text,
+    srt_to_vtt,
+    parse_subtitles,
+    split_cue_into_shorts_chunks,
+)
+from src.shorts_generator.script_generator import (
+    call_gemini,
+    generate_shorts_script,
+    extract_scene_search_queries,
+    extract_search_query,
+    extract_voiceover,
+    generate_youtube_metadata,
+)
+from src.shorts_generator.downloader import (
+    download_scene_background_videos,
+    download_background_video,
+)
+from src.shorts_generator.tts_engine import (
+    text_to_speech,
+)
+from src.shorts_generator.video_compositor import (
+    apply_audio_volume,
+    apply_audio_loop,
+    ensure_vertical_aspect_ratio,
+    create_subtitle_clips,
+    create_final_video,
+)
+from src.shorts_generator.pipeline import ShortsPipeline
+
+__all__ = [
+    "slugify_text",
+    "srt_to_vtt",
+    "parse_subtitles",
+    "split_cue_into_shorts_chunks",
+    "call_gemini",
+    "generate_shorts_script",
+    "extract_scene_search_queries",
+    "extract_search_query",
+    "extract_voiceover",
+    "generate_youtube_metadata",
+    "download_scene_background_videos",
+    "download_background_video",
+    "text_to_speech",
+    "apply_audio_volume",
+    "apply_audio_loop",
+    "ensure_vertical_aspect_ratio",
+    "create_subtitle_clips",
+    "create_final_video",
+    "ShortsPipeline",
+    "parse_arguments",
+    "main",
+]
+
+
+def parse_arguments() -> argparse.Namespace:
+    """Parses command-line arguments for automated Shorts production."""
     parser = argparse.ArgumentParser(
         description="🎬 AI YouTube Shorts & TikTok Generator - Automated Video Production Pipeline"
     )
@@ -1050,35 +89,35 @@ def parse_arguments():
         "-v",
         "--voice",
         type=str,
-        default="en-US-ChristopherNeural",
-        help="Edge-TTS voice model (default: en-US-ChristopherNeural, e.g. en-GB-RyanNeural, en-US-GuyNeural, tr-TR-AhmetNeural).",
+        default=DEFAULT_VOICE,
+        help=f"Edge-TTS voice model (default: {DEFAULT_VOICE}, e.g. en-GB-RyanNeural, en-US-GuyNeural, tr-TR-AhmetNeural).",
     )
     parser.add_argument(
         "-c",
         "--bg-count",
         type=int,
-        default=3,
-        help="Number of background video clips to download from Pixabay (default: 3).",
+        default=DEFAULT_BG_COUNT,
+        help=f"Number of background video clips to download from Pixabay (default: {DEFAULT_BG_COUNT}).",
     )
     parser.add_argument(
         "-o",
         "--output",
         type=str,
-        default="final_shorts.mp4",
-        help="Output video file path (default: final_shorts.mp4).",
+        default=DEFAULT_OUTPUT_FILENAME,
+        help=f"Output video file path (default: {DEFAULT_OUTPUT_FILENAME}).",
     )
     parser.add_argument(
         "-m",
         "--music",
         type=str,
-        default="bg_music.mp3",
-        help="Path to background music file (default: bg_music.mp3).",
+        default=DEFAULT_BG_MUSIC,
+        help=f"Path to background music file (default: {DEFAULT_BG_MUSIC}).",
     )
     parser.add_argument(
         "--font-size",
         type=int,
-        default=96,
-        help="Subtitle typography font size (default: 96).",
+        default=DEFAULT_FONT_SIZE,
+        help=f"Subtitle typography font size (default: {DEFAULT_FONT_SIZE}).",
     )
     parser.add_argument(
         "--non-interactive",
@@ -1090,12 +129,11 @@ def parse_arguments():
 
 async def main():
     args = parse_arguments()
-
-    topic = args.topic
     default_topic = "How AI is revolutionizing software development"
 
+    topic = args.topic
     if not topic:
-        if args.non-interactive or not sys.stdin.isatty():
+        if args.non_interactive or not sys.stdin.isatty():
             topic = default_topic
             print(f"[CLI] Konu belirtilmedi, varsayılan konu seçildi: '{topic}'")
         else:
@@ -1107,122 +145,21 @@ async def main():
             except (EOFError, KeyboardInterrupt):
                 topic = default_topic
 
-    # Konuya ve zamana özel çıktı proje klasörü (outputs/YYYYMMDD_HHMMSS_<slug>/)
-    timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-    slug = slugify_text(topic)
-    project_dir = os.path.join("outputs", f"{timestamp_str}_{slug}")
-    bg_dir = os.path.join(project_dir, "backgrounds")
-    os.makedirs(bg_dir, exist_ok=True)
-
-    project_video_path = os.path.join(project_dir, "video.mp4")
-    project_meta_path = os.path.join(project_dir, "metadata.json")
-    project_script_path = os.path.join(project_dir, "script.txt")
-    project_audio_path = os.path.join(project_dir, "voiceover.mp3")
-    project_sub_path = os.path.join(project_dir, "subtitles.srt")
-
-    print(f"\n{'=' * 60}")
-    print(f"🎬 AI YouTube Shorts Generator Başlatılıyor")
-    print(f"📌 Konu: '{topic}'")
-    print(f"📁 Proje Klasörü: '{project_dir}'")
-    print(f"🎙️ Ses Modeli: '{args.voice}'")
-    print(f"🎞️ Sahne Klip Sayısı: {args.bg_count}")
-    print(f"📁 Hızlı Erişim Çıktısı: '{args.output}'")
-    print(f"{'=' * 60}\n")
+    pipeline = ShortsPipeline(
+        voice=args.voice,
+        bg_count=args.bg_count,
+        music_path=args.music,
+        font_size=args.font_size,
+        fps=DEFAULT_FPS,
+    )
 
     try:
-        # 1. Generate viral script
-        script = generate_shorts_script(topic)
-        print("=== 1. GENERATED VIRAL SHORTS SCRIPT (ENGLISH) ===")
-        print(script)
-        with open(project_script_path, "w", encoding="utf-8") as f_s:
-            f_s.write(script)
-        print(f"💾 Senaryo arşivlendi: '{project_script_path}'")
-        print("\n" + "=" * 40 + "\n")
-
-        # 2. Generate YouTube SEO Metadata (Title, Description, Tags)
-        print("=== 2. GENERATING YOUTUBE SEO METADATA ===")
-        metadata = generate_youtube_metadata(topic, script)
-        with open(project_meta_path, "w", encoding="utf-8") as f_meta:
-            json.dump(metadata, f_meta, ensure_ascii=False, indent=2)
-
-        # Geriye uyumluluk için ana çıktı dosyasının yanına da metadata kaydet
-        root_meta_file = os.path.splitext(args.output)[0] + "_metadata.json"
-        with open(root_meta_file, "w", encoding="utf-8") as f_meta_root:
-            json.dump(metadata, f_meta_root, ensure_ascii=False, indent=2)
-
-        print(f"📌 Başlık: {metadata.get('title')}")
-        print(f"📝 Açıklama: {metadata.get('description')}")
-        print(f"🏷️ Etiketler: {', '.join(metadata.get('tags', []))}")
-        print(f"💾 Metadata kaydedildi: '{project_meta_path}' ve '{root_meta_file}'")
-        print("\n" + "=" * 40 + "\n")
-
-        # 3. Extract scene-specific background search queries & download Pixabay clips
-        scene_queries = extract_scene_search_queries(script, topic=topic)
-        print("=== 3. MULTI-SCENE BACKGROUND VIDEO DISCOVERY & DOWNLOAD ===")
-        print(f"Extracted Scene Queries: {scene_queries}")
-        downloaded_bgs = download_scene_background_videos(
-            scene_queries, output_dir=bg_dir, count=args.bg_count
+        await pipeline.run(
+            topic=topic,
+            quick_output_path=args.output,
         )
-        if downloaded_bgs:
-            print(f"Using {len(downloaded_bgs)} distinct background scene videos: {downloaded_bgs}")
-        else:
-            print("Background videos could not be downloaded. Falling back to default background.")
-        print("\n" + "=" * 40 + "\n")
-
-        # 4. Extract spoken voiceover dialogue
-        voiceover_text = extract_voiceover(script)
-        print("=== 4. EXTRACTED VOICEOVER NARRATION ===")
-        print(voiceover_text)
-        print("\n" + "=" * 40 + "\n")
-
-        # 5. Generate voiceover and time-synced subtitles via Edge TTS + SubMaker
-        print(f"Generating voiceover and time-synced subtitles (Voice: {args.voice})...")
-        await text_to_speech(
-            voiceover_text,
-            output_audio=project_audio_path,
-            output_subtitle=project_sub_path,
-            voice=args.voice,
-        )
-        # Geriye uyumluluk için kök dizine de kopyala
-        try:
-            shutil.copyfile(project_audio_path, "output.mp3")
-            shutil.copyfile(project_sub_path, "output.srt")
-            project_vtt = os.path.splitext(project_sub_path)[0] + ".vtt"
-            if os.path.exists(project_vtt):
-                shutil.copyfile(project_vtt, "output.vtt")
-        except Exception:
-            pass
-
-        print(f"Success! Audio: '{project_audio_path}', Subtitles: '{project_sub_path}'")
-
-        # 6. Video Editing, Audio Mixing & Captions Compositing
-        print("\n" + "=" * 40)
-        print("=== 6. VIDEO EDITING, AUDIO MIXING & CAPTIONS COMPOSITING ===")
-        create_final_video(
-            audio_path=project_audio_path,
-            bg_paths=downloaded_bgs if downloaded_bgs else "background.mp4",
-            subtitle_path=project_sub_path,
-            music_path=args.music,
-            output_path=project_video_path,
-            fps=24,
-            subtitle_font_size=args.font_size,
-        )
-
-        # Geriye uyumluluk için kök dizindeki hedefe de kopyala
-        try:
-            if os.path.abspath(project_video_path) != os.path.abspath(args.output):
-                shutil.copyfile(project_video_path, args.output)
-        except Exception:
-            pass
-
-        print("\n🎉 Tüm süreç başarıyla tamamlandı!")
-        print(f"🎬 Konuya Özel Video: {project_video_path}")
-        print(f"📁 Proje Arşiv Klasörü: {project_dir}")
-        print(f"🚀 Hızlı Erişim: {args.output}")
-        print(f"📋 YouTube Metadata: {project_meta_path}")
-
     except Exception as e:
-        print(f"Error occurred: {e}")
+        print(f"Error occurred during generation: {e}")
 
 
 if __name__ == "__main__":
