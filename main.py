@@ -5,6 +5,9 @@ import json
 import argparse
 import textwrap
 import asyncio
+import random
+import shutil
+from datetime import datetime
 import urllib.request
 import urllib.parse
 import requests
@@ -112,7 +115,12 @@ if GEMINI_API_KEY and not HAS_NEW_GENAI and genai is not None:
 def call_gemini(prompt: str, candidate_models: list[str] = None) -> str:
     """Gemini API'ye istek gönderir (google-genai ve google-generativeai ile tam uyumlu)."""
     if candidate_models is None:
-        candidate_models = ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-2.0-flash"]
+        candidate_models = [
+            "gemini-3.5-flash",
+            "gemini-3.8-flash",
+            "gemini-3.7-flash",
+            "gemini-3.5-flash-lite",
+        ]
 
     if not GEMINI_API_KEY:
         raise ValueError(
@@ -152,9 +160,21 @@ def call_gemini(prompt: str, candidate_models: list[str] = None) -> str:
     raise RuntimeError(f"Gemini API yanıt üretemedi: {last_error}")
 
 
+def slugify_text(text: str) -> str:
+    """Türkçe karakterleri dönüştürerek dosya sistemine ve URL'lere uygun temiz slug üretir."""
+    tr_map = str.maketrans({
+        "ç": "c", "Ç": "c", "ğ": "g", "Ğ": "g", "ı": "i", "İ": "i",
+        "ö": "o", "Ö": "o", "ş": "s", "Ş": "s", "ü": "u", "Ü": "u"
+    })
+    cleaned = text.translate(tr_map).lower()
+    cleaned = re.sub(r"[^a-z0-9]+", "-", cleaned).strip("-")
+    return cleaned[:45] if cleaned else "shorts"
+
+
 def generate_shorts_script(topic: str) -> str:
     """Verilen bir konu başlığından 30 saniyelik, viral potansiyeli yüksek
-    bir YouTube Shorts senaryosu üretir.
+    bir YouTube Shorts senaryosu ve 3 ana sahneye (Hook, Body, CTA) özel
+    İngilizce B-roll video arama terimleri üretir.
     """
     prompt = f"""
 You are an elite viral content creator specializing in hyper-retention YouTube Shorts and TikToks.
@@ -178,20 +198,202 @@ CRITICAL RULES:
 - Write exclusively in English.
 - Voiceover lines must contain ONLY spoken dialogue. Never include bracketed directions, emojis, asterisks, or sound effect markers inside Voiceover lines.
 - Keep sentences short (3-8 words per sentence). Speak with intensity and pace.
-- At the very end of your response, on a new line, add exactly:
-SEARCH_QUERY: [A single English word representing the core visual theme to find matching background footage. You MUST choose a cinematic, atmospheric, or moody word that fits the topic (e.g., dark, horror, mystery, space, cyber, ancient, thriller, gold).]
+
+At the very end of your response, provide exactly 3 tailored English search queries for Pixabay video footage (one for each section: Hook, Body, CTA). Each query should consist of 2 to 4 highly visual, topic-specific keywords describing real footage (NOT generic words like just 'dark'):
+HOOK_QUERY: [2-4 English keywords for Hook visual, e.g. 'coding screen terminal' or 'shocked human face']
+BODY_QUERY: [2-4 English keywords for Body visual, e.g. 'artificial intelligence server' or 'matrix digital data']
+CTA_QUERY: [2-4 English keywords for CTA visual, e.g. 'futuristic robot cyberpunk' or 'countdown digital timer']
 """
     return call_gemini(prompt)
 
 
-def extract_search_query(script: str, default: str = "dark") -> str:
-    """Senaryonun altındaki SEARCH_QUERY etiketinden arka plan arama terimini ayıklar."""
-    match = re.search(r"SEARCH_QUERY\s*:\s*\[?([a-zA-Z0-9_\-]+)\]?", script, re.IGNORECASE)
-    if match:
-        query = match.group(1).strip().lower()
-        if query:
-            return query
-    return default
+def extract_scene_search_queries(script: str, topic: str = "") -> list[str]:
+    """Senaryodan 3 ana sahneye (Hook, Body, CTA) ait video arama terimlerini ayıklar.
+    Eski format (SEARCH_QUERY) veya eksik etiket durumunda akıllı geri dönüşler sağlar.
+    """
+    queries = []
+    for tag in ["HOOK_QUERY", "BODY_QUERY", "CTA_QUERY"]:
+        match = re.search(rf"{tag}\s*:\s*\[?([^\r\n\]]+)\]?", script, re.IGNORECASE)
+        if match:
+            clean_q = match.group(1).strip()
+            if clean_q:
+                queries.append(clean_q)
+
+    # Eğer 3 etiket bulunamadıysa tekli SEARCH_QUERY etiketini kontrol et
+    if len(queries) < 3:
+        m_single = re.search(r"SEARCH_QUERY\s*:\s*\[?([^\r\n\]]+)\]?", script, re.IGNORECASE)
+        if m_single:
+            base_q = m_single.group(1).strip()
+            while len(queries) < 3:
+                queries.append(base_q)
+
+    # Eğer hala eksikse konudan türetilen tematik terimleri ata
+    if not queries:
+        clean_topic = re.sub(r"[^a-zA-Z0-9\s]", " ", topic).strip()
+        words = [w for w in clean_topic.split() if len(w) > 3]
+        base = " ".join(words[:2]) if words else "technology"
+        queries = [f"{base} visual", f"{base} network", f"{base} cinematic"]
+
+    while len(queries) < 3:
+        queries.append(queries[-1] if queries else "cinematic technology")
+
+    return queries[:3]
+
+
+def extract_search_query(script: str, default: str = "technology") -> str:
+    """Geriye uyumluluk için tek arama terimi döndüren yardımcı fonksiyon."""
+    queries = extract_scene_search_queries(script)
+    return queries[0] if queries else default
+
+
+def download_scene_background_videos(
+    scene_queries: list[str],
+    output_dir: str = "backgrounds",
+    count: int = 3,
+) -> list[str]:
+    """Her sahne (Hook, Body, CTA) için konuya özel arama terimleriyle Pixabay Video API
+    üzerinden dikey (9:16 portrait) ve HD formatta arka plan videoları indirir.
+
+    Kliplerin birbirini tekrar etmemesi için kullanılan video ID'lerini takip eder,
+    en iyi aday havuzu arasından seçim yaparak zengin bir görsel çeşitlilik sağlar.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    api_key = os.getenv("PIXABAY_API_KEY")
+    if not api_key:
+        print("[Pixabay] Uyarı: PIXABAY_API_KEY ortam değişkeni bulunamadı (.env dosyasını kontrol edin).")
+        return []
+
+    scene_labels = ["hook", "body", "cta"]
+    downloaded_files = []
+    used_video_ids = set()
+
+    api_url = "https://pixabay.com/api/videos/"
+
+    print(f"\n[Pixabay] Sahne bazlı arka plan videoları aranıyor ({len(scene_queries)} sahne)...")
+
+    for i in range(count):
+        raw_query = scene_queries[i] if i < len(scene_queries) else scene_queries[-1]
+        scene_label = scene_labels[i] if i < len(scene_labels) else f"scene_{i+1}"
+        clean_query = re.sub(r"[^a-zA-Z0-9\s]", " ", raw_query).strip()
+
+        # Arama alternatifleri: tam sorgu -> ilk 2 kelime -> ilk kelime -> genel fallback
+        words = clean_query.split()
+        search_candidates = [clean_query]
+        if len(words) >= 3:
+            search_candidates.append(" ".join(words[:2]))
+        if len(words) >= 2:
+            search_candidates.append(words[0])
+        search_candidates.extend(["technology dark", "cinematic abstract", "dark atmosphere"])
+
+        hits = []
+        successful_query = ""
+        for q_attempt in search_candidates:
+            if not q_attempt.strip():
+                continue
+            try:
+                params = {
+                    "key": api_key,
+                    "q": q_attempt,
+                    "video_type": "film",
+                    "per_page": 20,
+                    "safesearch": "true",
+                }
+                resp = requests.get(api_url, params=params, timeout=12)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    candidate_hits = [h for h in data.get("hits", []) if h.get("id") not in used_video_ids]
+                    if candidate_hits:
+                        hits = candidate_hits
+                        successful_query = q_attempt
+                        break
+            except Exception as req_err:
+                print(f"[Pixabay] '{q_attempt}' sorgu hatası: {req_err}")
+                continue
+
+        if not hits:
+            print(f"[Pixabay] Sahne {i+1} ({scene_label.upper()}) için uygun video bulunamadı.")
+            continue
+
+        # Dikey (portrait: height > width) ve HD kalitedeki videoları puanla
+        def score_hit(h_item):
+            v_dict = h_item.get("videos", {})
+            v_info = v_dict.get("large") or v_dict.get("medium") or v_dict.get("small") or {}
+            w = v_info.get("width", 0)
+            h = v_info.get("height", 0)
+            is_vertical = 15 if h > w else 0
+            is_hd = 8 if (w >= 1080 or h >= 1080) else (4 if (w >= 720 or h >= 720) else 0)
+            return is_vertical + is_hd
+
+        sorted_hits = sorted(hits, key=score_hit, reverse=True)
+
+        # En iyi ilk 5 eşleşme arasından seçim yaparak aynı videoların sürekli tekrar etmesini önle
+        pool_size = min(5, len(sorted_hits))
+        top_pool = sorted_hits[:pool_size]
+        chosen_hit = random.choice(top_pool)
+        used_video_ids.add(chosen_hit.get("id"))
+
+        videos = chosen_hit.get("videos", {})
+        info = None
+        for q_name in ["large", "medium", "small"]:
+            candidate = videos.get(q_name)
+            if candidate and candidate.get("url"):
+                if q_name == "medium" and (candidate.get("width", 0) >= 720 or candidate.get("height", 0) >= 720):
+                    info = candidate
+                    break
+                if q_name == "large":
+                    if candidate.get("size", 0) > 35 * 1024 * 1024 and videos.get("medium"):
+                        info = videos.get("medium")
+                    else:
+                        info = candidate
+                    break
+        if not info or not info.get("url"):
+            info = videos.get("large") or videos.get("medium") or videos.get("small")
+
+        if not info or not info.get("url"):
+            continue
+
+        video_url = info["url"]
+        output_file = os.path.join(output_dir, f"scene_{i+1}_{scene_label}.mp4")
+
+        try:
+            w_curr = info.get("width", 0)
+            h_curr = info.get("height", 0)
+            orientation = "Dikey (Portrait)" if h_curr > w_curr else "Yatay (Landscape)"
+            print(f"[Pixabay] Sahne {i+1}/{count} [{scene_label.upper()} - '{successful_query}'] indiriliyor ({w_curr}x{h_curr} - {orientation})...")
+
+            downloaded = False
+            try:
+                r = requests.get(video_url, stream=True, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
+                if r.status_code == 200:
+                    with open(output_file, "wb") as f:
+                        for chunk in r.iter_content(chunk_size=65536):
+                            if chunk:
+                                f.write(chunk)
+                    downloaded = True
+            except Exception:
+                downloaded = False
+
+            if not downloaded:
+                req = urllib.request.Request(video_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+                with urllib.request.urlopen(req) as resp, open(output_file, "wb") as f:
+                    while True:
+                        chunk = resp.read(65536)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                downloaded = True
+
+            if downloaded and os.path.exists(output_file) and os.path.getsize(output_file) > 1000:
+                size_mb = os.path.getsize(output_file) / (1024 * 1024)
+                print(f"[Pixabay] Başarılı! {output_file} kaydedildi ({size_mb:.2f} MB)")
+                downloaded_files.append(output_file)
+            else:
+                print(f"[Pixabay] Video indirilemedi: {output_file}")
+        except Exception as dl_err:
+            print(f"[Pixabay] Sahne {i+1} indirme hatası: {dl_err}")
+
+    print(f"[Pixabay] Toplam {len(downloaded_files)}/{count} sahne videosu başarıyla hazırlandı.")
+    return downloaded_files
 
 
 def download_background_video(
@@ -199,140 +401,8 @@ def download_background_video(
     count: int = 3,
     output_prefix: str = "bg",
 ) -> list[str]:
-    """Pixabay Video API kullanarak arama sorgusuna uygun en fazla `count` adet
-    (varsayılan: 3) kaliteli arka plan videosu bulur ve ('bg_1.mp4', 'bg_2.mp4', 'bg_3.mp4')
-    olarak indirir.
-
-    Args:
-        query: İngilizce arama terimi (örn. 'dark', 'mystery', 'horror', 'space').
-        count: İndirilecek video sayısı (varsayılan: 3).
-        output_prefix: Dosya adı öneki (varsayılan: 'bg').
-
-    Returns:
-        list[str]: Başarıyla indirilen video dosyalarının yolları listesi.
-    """
-    api_key = os.getenv("PIXABAY_API_KEY")
-    if not api_key:
-        print("[Pixabay] Uyarı: PIXABAY_API_KEY ortam değişkeni bulunamadı (.env dosyasını kontrol edin).")
-        return []
-
-    clean_query = query.strip().replace("[", "").replace("]", "")
-    print(f"\n[Pixabay] '{clean_query}' araması için {count} adet arka plan videosu sorgulanıyor...")
-
-    api_url = "https://pixabay.com/api/videos/"
-    params = {
-        "key": api_key,
-        "q": clean_query,
-        "video_type": "film",
-        "per_page": 20,
-        "safesearch": "true",
-    }
-
-    try:
-        response = requests.get(api_url, params=params, timeout=15)
-        response.raise_for_status()
-        data = response.json()
-        hits = data.get("hits", [])
-
-        # Eğer sorgu ile sonuç bulunamadıysa atmosferik 'dark' sorgusu ile dene
-        if not hits:
-            print(f"[Pixabay] '{clean_query}' için video bulunamadı. Genel atmosferik 'dark' sorgusu deneniyor...")
-            params["q"] = "dark"
-            response = requests.get(api_url, params=params, timeout=15)
-            data = response.json()
-            hits = data.get("hits", [])
-
-        if not hits:
-            print("[Pixabay] Uyarı: Hiçbir arka plan videosu bulunamadı.")
-            return []
-
-        downloaded_files = []
-
-        # Dikey (portrait: height > width) ve HD formatta olan videoları önceliklendir
-        def score_hit(h_item):
-            v_dict = h_item.get("videos", {})
-            v_info = v_dict.get("large") or v_dict.get("medium") or v_dict.get("small") or {}
-            w = v_info.get("width", 0)
-            h = v_info.get("height", 0)
-            # Dikey video (9:16 portrait) en yüksek önceliğe sahiptir
-            is_vertical = 10 if h > w else 0
-            # HD çözünürlük puanı
-            is_hd = 5 if (w >= 1080 or h >= 1080) else (2 if (w >= 720 or h >= 720) else 0)
-            return is_vertical + is_hd
-
-        sorted_hits = sorted(hits, key=score_hit, reverse=True)
-
-        # Aday videoları sırayla dene ve count adet indir
-        for idx, hit in enumerate(sorted_hits):
-            if len(downloaded_files) >= count:
-                break
-
-            videos = hit.get("videos", {})
-            # En uygun HD/kaliteli varyantı seç (aşırı büyük 4K dosyaları yerine optimize HD tercih et)
-            info = None
-            for q_name in ["large", "medium", "small"]:
-                candidate = videos.get(q_name)
-                if candidate and candidate.get("url"):
-                    if q_name == "medium" and (candidate.get("width", 0) >= 720 or candidate.get("height", 0) >= 720):
-                        info = candidate
-                        break
-                    if q_name == "large":
-                        if candidate.get("size", 0) > 35 * 1024 * 1024 and videos.get("medium"):
-                            info = videos.get("medium")
-                        else:
-                            info = candidate
-                        break
-            if not info or not info.get("url"):
-                info = videos.get("large") or videos.get("medium") or videos.get("small")
-
-            if not info or not info.get("url"):
-                continue
-
-            video_url = info["url"]
-            output_file = f"{output_prefix}_{len(downloaded_files) + 1}.mp4"
-
-            try:
-                w_curr = info.get("width", 0)
-                h_curr = info.get("height", 0)
-                orientation = "Dikey (Portrait)" if h_curr > w_curr else "Yatay (Landscape)"
-                print(f"[Pixabay] Video {len(downloaded_files) + 1}/{count} indiriliyor ({w_curr}x{h_curr} - {orientation})...")
-                downloaded = False
-                try:
-                    r = requests.get(video_url, stream=True, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
-                    if r.status_code == 200:
-                        with open(output_file, "wb") as f:
-                            for chunk in r.iter_content(chunk_size=65536):
-                                if chunk:
-                                    f.write(chunk)
-                        downloaded = True
-                except Exception:
-                    downloaded = False
-
-                if not downloaded:
-                    req = urllib.request.Request(video_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
-                    with urllib.request.urlopen(req) as resp, open(output_file, "wb") as f:
-                        while True:
-                            chunk = resp.read(65536)
-                            if not chunk:
-                                break
-                            f.write(chunk)
-                    downloaded = True
-
-                if downloaded and os.path.exists(output_file) and os.path.getsize(output_file) > 1000:
-                    size_mb = os.path.getsize(output_file) / (1024 * 1024)
-                    print(f"[Pixabay] Başarılı! {output_file} kaydedildi ({size_mb:.2f} MB)")
-                    downloaded_files.append(output_file)
-                else:
-                    print(f"[Pixabay] Video indirilemedi: {output_file}")
-            except Exception as dl_err:
-                print(f"[Pixabay] Video {len(downloaded_files) + 1} indirme hatası: {dl_err}. Sıradaki video deneniyor...")
-
-        print(f"[Pixabay] Toplam {len(downloaded_files)}/{count} arka plan videosu hazırlandı.")
-        return downloaded_files
-
-    except Exception as e:
-        print(f"[Pixabay] Pixabay API sorgulama hatası: {e}")
-        return []
+    """Geriye uyumluluk sarmalayıcısı."""
+    return download_scene_background_videos([query] * count, output_dir=".", count=count)
 
 
 def extract_voiceover(script: str) -> str:
@@ -800,39 +870,39 @@ def create_final_video(
             except Exception as e:
                 print(f"[Video Kurgu] Uyarı: '{video_path}' yüklenemedi ({e}). Diğer kliplerle devam ediliyor.")
 
+    allocated_subclips = []
     if loaded_clips:
-        try:
-            if len(loaded_clips) > 1:
-                print(f"[Video Kurgu] {len(loaded_clips)} farklı arka plan klibi uç uca birleştiriliyor (concatenate_videoclips)...")
-                video_clip = concatenate_videoclips(loaded_clips)
+        num_clips = len(loaded_clips)
+        target_slice = audio_duration / num_clips
+        print(f"[Video Kurgu] {num_clips} adet sahne arka plan klibi video süresine göre dengeli paylaştırılıyor (~{target_slice:.2f}s her klip)...")
+
+        for idx, clip in enumerate(loaded_clips):
+            # Son klip olası yuvarlama farkını dengeler
+            cur_target = target_slice if idx < num_clips - 1 else (audio_duration - (target_slice * (num_clips - 1)))
+            cur_target = max(0.5, cur_target)
+
+            if clip.duration >= cur_target:
+                c_slice = clip.subclipped(0, cur_target) if hasattr(clip, "subclipped") else clip.subclip(0, cur_target)
             else:
-                video_clip = loaded_clips[0]
+                n_loops = int(cur_target // clip.duration) + 1
+                looped = concatenate_videoclips([clip] * n_loops)
+                c_slice = looped.subclipped(0, cur_target) if hasattr(looped, "subclipped") else looped.subclip(0, cur_target)
+            allocated_subclips.append(c_slice)
+
+        try:
+            if len(allocated_subclips) > 1:
+                video_clip = concatenate_videoclips(allocated_subclips)
+            else:
+                video_clip = allocated_subclips[0]
         except Exception as concat_err:
             print(f"[Video Kurgu] Klipler birleştirilirken hata oluştu ({concat_err}). İlk geçerli klip kullanılıyor...")
             video_clip = loaded_clips[0]
-
-        bg_duration = video_clip.duration
-        print(f"[Video Kurgu] Birleştirilmiş arka plan videosu toplam süresi: {bg_duration:.2f} saniye")
-
-        if bg_duration >= audio_duration:
-            print("[Video Kurgu] Birleştirilmiş video sesten uzun, video ses süresine göre kırpılıyor...")
-            if hasattr(video_clip, "subclipped"):
-                video_clip = video_clip.subclipped(0, audio_duration)
+            if video_clip.duration >= audio_duration:
+                video_clip = video_clip.subclipped(0, audio_duration) if hasattr(video_clip, "subclipped") else video_clip.subclip(0, audio_duration)
             else:
-                video_clip = video_clip.subclip(0, audio_duration)
-        else:
-            print("[Video Kurgu] Birleştirilmiş video sesten kısa, video ses süresine kadar döngüye alınıyor...")
-            if hasattr(video_clip, "with_effects") and hasattr(vfx, "Loop"):
-                video_clip = video_clip.with_effects([vfx.Loop(duration=audio_duration)])
-            elif hasattr(vfx, "loop"):
-                video_clip = vfx.loop(video_clip, duration=audio_duration)
-            else:
-                n_loops = int(audio_duration // bg_duration) + 1
-                video_clip = concatenate_videoclips([video_clip] * n_loops)
-                if hasattr(video_clip, "subclipped"):
-                    video_clip = video_clip.subclipped(0, audio_duration)
-                else:
-                    video_clip = video_clip.subclip(0, audio_duration)
+                n_loops = int(audio_duration // video_clip.duration) + 1
+                looped = concatenate_videoclips([video_clip] * n_loops)
+                video_clip = looped.subclipped(0, audio_duration) if hasattr(looped, "subclipped") else looped.subclip(0, audio_duration)
     else:
         print("[Video Kurgu] Arka plan videosu bulunamadı. 1080x1920 koyu renkli statik ColorClip oluşturuluyor...")
         video_clip = ColorClip(
@@ -906,6 +976,11 @@ def create_final_video(
             lc.close()
         except Exception:
             pass
+    for asc in allocated_subclips:
+        try:
+            asc.close()
+        except Exception:
+            pass
     try:
         video_clip.close()
     except Exception:
@@ -936,6 +1011,12 @@ Topic: {topic}
 Script:
 {script[:500]}
 
+Rules:
+- The title, description, and tags MUST be written in English to match the English voiceover.
+- Title must be high CTR, curiosity-inducing, under 60 characters, and end with #shorts.
+- Description must be 2 punchy sentences with 4-5 relevant hashtags.
+- Tags must be 5-8 hyper-relevant search tags.
+
 Return STRICTLY a valid JSON object with the following keys and nothing else:
 {{
   "title": "A short, viral, click-worthy YouTube title with #shorts under 60 characters",
@@ -963,7 +1044,7 @@ def parse_arguments():
         "--topic",
         type=str,
         default=None,
-        help="Video topic (e.g. 'The FBI interrogation trick to spot a liar instantly'). If omitted, prompts interactively.",
+        help="Video topic (e.g. 'How AI is revolutionizing software development'). If omitted, prompts interactively.",
     )
     parser.add_argument(
         "-v",
@@ -1011,7 +1092,7 @@ async def main():
     args = parse_arguments()
 
     topic = args.topic
-    default_topic = "The FBI interrogation trick to spot a liar instantly"
+    default_topic = "How AI is revolutionizing software development"
 
     if not topic:
         if args.non-interactive or not sys.stdin.isatty():
@@ -1026,12 +1107,26 @@ async def main():
             except (EOFError, KeyboardInterrupt):
                 topic = default_topic
 
+    # Konuya ve zamana özel çıktı proje klasörü (outputs/YYYYMMDD_HHMMSS_<slug>/)
+    timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+    slug = slugify_text(topic)
+    project_dir = os.path.join("outputs", f"{timestamp_str}_{slug}")
+    bg_dir = os.path.join(project_dir, "backgrounds")
+    os.makedirs(bg_dir, exist_ok=True)
+
+    project_video_path = os.path.join(project_dir, "video.mp4")
+    project_meta_path = os.path.join(project_dir, "metadata.json")
+    project_script_path = os.path.join(project_dir, "script.txt")
+    project_audio_path = os.path.join(project_dir, "voiceover.mp3")
+    project_sub_path = os.path.join(project_dir, "subtitles.srt")
+
     print(f"\n{'=' * 60}")
     print(f"🎬 AI YouTube Shorts Generator Başlatılıyor")
     print(f"📌 Konu: '{topic}'")
+    print(f"📁 Proje Klasörü: '{project_dir}'")
     print(f"🎙️ Ses Modeli: '{args.voice}'")
-    print(f"🎞️ Arka Plan Klip Sayısı: {args.bg_count}")
-    print(f"📁 Çıktı Dosyası: '{args.output}'")
+    print(f"🎞️ Sahne Klip Sayısı: {args.bg_count}")
+    print(f"📁 Hızlı Erişim Çıktısı: '{args.output}'")
     print(f"{'=' * 60}\n")
 
     try:
@@ -1039,31 +1134,37 @@ async def main():
         script = generate_shorts_script(topic)
         print("=== 1. GENERATED VIRAL SHORTS SCRIPT (ENGLISH) ===")
         print(script)
+        with open(project_script_path, "w", encoding="utf-8") as f_s:
+            f_s.write(script)
+        print(f"💾 Senaryo arşivlendi: '{project_script_path}'")
         print("\n" + "=" * 40 + "\n")
 
         # 2. Generate YouTube SEO Metadata (Title, Description, Tags)
         print("=== 2. GENERATING YOUTUBE SEO METADATA ===")
         metadata = generate_youtube_metadata(topic, script)
-        meta_file = os.path.splitext(args.output)[0] + "_metadata.json"
-        with open(meta_file, "w", encoding="utf-8") as f_meta:
+        with open(project_meta_path, "w", encoding="utf-8") as f_meta:
             json.dump(metadata, f_meta, ensure_ascii=False, indent=2)
+
+        # Geriye uyumluluk için ana çıktı dosyasının yanına da metadata kaydet
+        root_meta_file = os.path.splitext(args.output)[0] + "_metadata.json"
+        with open(root_meta_file, "w", encoding="utf-8") as f_meta_root:
+            json.dump(metadata, f_meta_root, ensure_ascii=False, indent=2)
+
         print(f"📌 Başlık: {metadata.get('title')}")
         print(f"📝 Açıklama: {metadata.get('description')}")
         print(f"🏷️ Etiketler: {', '.join(metadata.get('tags', []))}")
-        print(f"💾 Metadata kaydedildi: '{meta_file}'")
+        print(f"💾 Metadata kaydedildi: '{project_meta_path}' ve '{root_meta_file}'")
         print("\n" + "=" * 40 + "\n")
 
-        # 3. Extract background search query & download Pixabay background clips
-        search_query = extract_search_query(script, default="dark")
-        print("=== 3. PIXABAY MULTI-VIDEO BACKGROUND DOWNLOAD ===")
-        print(f"Extracted search query: '{search_query}'")
-        downloaded_bgs = download_background_video(
-            search_query, count=args.bg_count, output_prefix="bg"
+        # 3. Extract scene-specific background search queries & download Pixabay clips
+        scene_queries = extract_scene_search_queries(script, topic=topic)
+        print("=== 3. MULTI-SCENE BACKGROUND VIDEO DISCOVERY & DOWNLOAD ===")
+        print(f"Extracted Scene Queries: {scene_queries}")
+        downloaded_bgs = download_scene_background_videos(
+            scene_queries, output_dir=bg_dir, count=args.bg_count
         )
         if downloaded_bgs:
-            print(
-                f"Using {len(downloaded_bgs)} downloaded Pixabay background videos: {downloaded_bgs}"
-            )
+            print(f"Using {len(downloaded_bgs)} distinct background scene videos: {downloaded_bgs}")
         else:
             print("Background videos could not be downloaded. Falling back to default background.")
         print("\n" + "=" * 40 + "\n")
@@ -1075,35 +1176,50 @@ async def main():
         print("\n" + "=" * 40 + "\n")
 
         # 5. Generate voiceover and time-synced subtitles via Edge TTS + SubMaker
-        output_audio = "output.mp3"
-        output_subtitle = "output.srt"
         print(f"Generating voiceover and time-synced subtitles (Voice: {args.voice})...")
         await text_to_speech(
             voiceover_text,
-            output_audio=output_audio,
-            output_subtitle=output_subtitle,
+            output_audio=project_audio_path,
+            output_subtitle=project_sub_path,
             voice=args.voice,
         )
-        print(
-            f"Success! Audio: '{output_audio}', Subtitles: '{output_subtitle}' & '{os.path.splitext(output_subtitle)[0]}.vtt'"
-        )
+        # Geriye uyumluluk için kök dizine de kopyala
+        try:
+            shutil.copyfile(project_audio_path, "output.mp3")
+            shutil.copyfile(project_sub_path, "output.srt")
+            project_vtt = os.path.splitext(project_sub_path)[0] + ".vtt"
+            if os.path.exists(project_vtt):
+                shutil.copyfile(project_vtt, "output.vtt")
+        except Exception:
+            pass
+
+        print(f"Success! Audio: '{project_audio_path}', Subtitles: '{project_sub_path}'")
 
         # 6. Video Editing, Audio Mixing & Captions Compositing
         print("\n" + "=" * 40)
         print("=== 6. VIDEO EDITING, AUDIO MIXING & CAPTIONS COMPOSITING ===")
         create_final_video(
-            audio_path=output_audio,
+            audio_path=project_audio_path,
             bg_paths=downloaded_bgs if downloaded_bgs else "background.mp4",
-            subtitle_path=output_subtitle,
+            subtitle_path=project_sub_path,
             music_path=args.music,
-            output_path=args.output,
+            output_path=project_video_path,
             fps=24,
             subtitle_font_size=args.font_size,
         )
 
+        # Geriye uyumluluk için kök dizindeki hedefe de kopyala
+        try:
+            if os.path.abspath(project_video_path) != os.path.abspath(args.output):
+                shutil.copyfile(project_video_path, args.output)
+        except Exception:
+            pass
+
         print("\n🎉 Tüm süreç başarıyla tamamlandı!")
-        print(f"🎬 Video: {args.output}")
-        print(f"📋 YouTube Metadata: {meta_file}")
+        print(f"🎬 Konuya Özel Video: {project_video_path}")
+        print(f"📁 Proje Arşiv Klasörü: {project_dir}")
+        print(f"🚀 Hızlı Erişim: {args.output}")
+        print(f"📋 YouTube Metadata: {project_meta_path}")
 
     except Exception as e:
         print(f"Error occurred: {e}")

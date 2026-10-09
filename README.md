@@ -3,14 +3,15 @@
 An automated, end-to-end Python pipeline that generates highly engaging, viral-ready YouTube Shorts and TikToks. This tool handles everything from scriptwriting via LLM to voiceover generation, dynamic subtitle rendering, and audio mixing.
 
 ## ✨ Features
-* **AI Scriptwriting:** Integrates with Google Gemini API (`google-genai` & `google-generativeai`) to generate compelling, viral hooks and 30-second scripts with automatic background search query tagging.
+* **AI Scriptwriting & Scene B-Roll Tagging:** Integrates with Google Gemini API (`google-genai` & `google-generativeai`) to generate compelling viral scripts and 3 distinct scene-specific visual queries (`HOOK_QUERY`, `BODY_QUERY`, `CTA_QUERY`).
+* **Dedicated Project Archiving (`outputs/`):** Automatically creates a clean, dated project folder (`outputs/YYYYMMDD_HHMMSS_<slug>/`) storing the generated video, metadata, voiceover, subtitles, script, and raw background footage. Never overwrites past projects.
+* **Intelligent Multi-Scene Pixabay Discovery:** Automatically searches and downloads 3 distinct 9:16 portrait/HD background clips matching the exact narrative beat of each scene, with randomized diversity to prevent repetitive footage across videos.
+* **Proportional Scene Pacing:** Evenly allocates and trims each background video to synchronize directly with the spoken narrative (Hook, Body, CTA), ensuring every scene transition is visually impactful.
 * **Interactive CLI & Custom Arguments:** Run interactively or supply arguments directly (`--topic`, `--voice`, `--bg-count`, `--output`, `--music`).
-* **Automated YouTube SEO Metadata:** Automatically produces viral title with `#shorts`, 2-sentence description with hashtags, and SEO tags exported to `*_metadata.json`.
-* **Dynamic Multi-Video Background:** Automatically queries the Pixabay Video API for thematic vertical/HD clips, downloads distinct video clips (`bg_1.mp4`, `bg_2.mp4`, `bg_3.mp4`), and concatenates them seamlessly into an engaging dynamic background.
+* **Automated YouTube SEO Metadata:** Produces viral English titles with `#shorts`, 2-sentence descriptions with hashtags, and SEO search tags.
 * **High-Quality TTS:** Uses `edge-tts` (`en-US-ChristopherNeural`, `en-GB-RyanNeural`, etc.) for deep, professional, and natural-sounding voiceovers.
-* **Ultra-Dynamic Captions (TikTok Style):** Automatically breaks down speech into 1-2 punchy words with enlarged high-contrast typography (88-96px Impact/Arial Bold, uppercase, drop shadow) centered in the 9:16 vertical safe zone for maximum viewer retention.
-* **Smart Audio Mixing:** Automatically detects `bg_music.mp3`, applies audio ducking (12% volume), and loops or trims the track to fit the video length.
-* **Auto-Formatting & Resilient Fallbacks:** Strictly normalizes background clips to 1080x1920 (9:16 aspect ratio) at 24 FPS with center-crop and loop/trim matching the voiceover duration, falling back gracefully if fewer clips are available.
+* **Ultra-Dynamic Captions (TikTok Style):** Breaks down speech into 1-2 punchy words with enlarged high-contrast typography (88-96px Impact/Arial Bold, uppercase, drop shadow) centered in the 9:16 safe zone.
+* **Smart Audio Mixing & Ducking:** Automatically loops or trims `bg_music.mp3`, applying volume ducking (12%) beneath the voiceover.
 
 ## 🚀 Tech Stack
 * **Python 3.10+**
