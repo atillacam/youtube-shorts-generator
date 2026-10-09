@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "youtube-shorts-generator"
+version = "0.2.0"
+description = "Automated AI-powered YouTube Shorts & TikTok video generation pipeline"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+  { name = "atillacam", email = "candan58@outlook.com" }
+]
+keywords = [
+  "youtube-shorts",
+  "tiktok",
+  "ai",
+  "gemini",
+  "edge-tts",
+  "moviepy",
+  "video-generator",
+  "automation"
+]
+dependencies = [
+  "google-generativeai",
+  "google-genai",
+  "python-dotenv",
+  "edge-tts",
+  "moviepy",
+  "requests"
+]
+
+[project.scripts]
+youtube-shorts = "main:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*", "src.shorts_generator*"]
