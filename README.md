@@ -26,26 +26,32 @@ youtube-shorts-generator/
 ├── src/
 │   └── shorts_generator/
 │       ├── __init__.py           # Package exports & version
-│       ├── config.py             # Global constants, paths, and environment settings
+│       ├── models.py             # Data schemas (SubtitleCue, ScriptSegment, PipelineResult)
+│       ├── config.py             # Global constants, paths, style presets, and env settings
 │       ├── utils.py              # Slugify, subtitle parser, cue chunking, and VTT tools
 │       ├── script_generator.py   # Gemini LLM orchestration, scene queries, and SEO metadata
 │       ├── downloader.py         # Pixabay Video API client with 9:16 aspect ratio scoring
-│       ├── tts_engine.py         # Edge-TTS voice synthesis & SubMaker timing generator
+│       ├── tts_engine.py         # Edge-TTS voice synthesis, alias resolution & timing generator
 │       ├── video_compositor.py   # MoviePy 1.x & 2.x compositing, typography, and audio ducking
-│       └── pipeline.py           # End-to-end ShortsPipeline orchestrator
+│       └── pipeline.py           # End-to-end ShortsPipeline orchestrator with progress hooks
 ├── tests/
 │   ├── __init__.py
 │   ├── test_utils.py             # Tests for slugification, cue chunking, and subtitles
 │   ├── test_config.py            # Tests for configuration defaults and dimensions
-│   └── test_script_parser.py     # Tests for script tags, scene queries, and voiceover isolation
+│   ├── test_script_parser.py     # Tests for script tags, scene queries, and voiceover isolation
+│   ├── test_downloader.py        # Tests for video aspect scoring and stream selection
+│   ├── test_tts.py               # Tests for voice alias resolution and validation
+│   ├── test_models.py            # Tests for dataclass serialization and dict compatibility
+│   └── test_pipeline.py          # Tests for end-to-end pipeline dry-run and callbacks
 ├── .github/
 │   └── workflows/
 │       └── ci.yml                # Automated CI matrix across Python 3.10, 3.11, 3.12
 ├── main.py                       # CLI entrypoint and backward-compatible module wrapper
-├── pyproject.toml                # Project packaging metadata and build definitions
+├── pyproject.toml                # Project packaging metadata, ruff, mypy, and test configs
 ├── requirements.txt              # Production dependencies
 └── README.md                     # Documentation
 ```
+
 
 ---
 
@@ -98,12 +104,34 @@ python main.py --topic "How AI is revolutionizing software development" --voice 
 | Flag | Description | Default |
 |---|---|---|
 | `-t`, `--topic` | Video topic or prompt | Interactive prompt / Default |
-| `-v`, `--voice` | Edge-TTS voice model | `en-US-ChristopherNeural` |
+| `-v`, `--voice` | Edge-TTS voice model or alias (`en-us-male`, `tr-male`, etc.) | `en-US-ChristopherNeural` |
 | `-c`, `--bg-count` | Number of Pixabay background clips | `3` |
 | `-o`, `--output` | Final video file name | `final_shorts.mp4` |
 | `-m`, `--music` | Path to background music | `bg_music.mp3` |
 | `--font-size` | Subtitle typography font size | `96` |
+| `--style-preset` | Typography preset (`viral_yellow`, `tiktok_cyan`, `classic_white`, `alert_red`) | `viral_yellow` |
+| `--dry-run` | Generate script & SEO metadata without rendering video | `False` |
+| `--list-voices` | Print available voice aliases and exit | `False` |
+| `--validate-env` | Check status of Gemini and Pixabay API keys | `False` |
 | `--non-interactive` | Disable interactive prompts | `False` |
+
+### Programmatic Python Usage
+
+```python
+import asyncio
+from src.shorts_generator import ShortsPipeline
+
+async def generate():
+    pipeline = ShortsPipeline(voice="en-us-male", bg_count=3)
+    result = await pipeline.run(
+        topic="How quantum computers break modern encryption",
+        quick_output_path="quantum_shorts.mp4"
+    )
+    print("Video rendered:", result.video_path)
+    print("YouTube SEO Title:", result.metadata["title"])
+
+asyncio.run(generate())
+```
 
 ---
 
@@ -114,7 +142,7 @@ To run the unit test suite locally:
 python -m unittest discover tests -v
 ```
 
-All tests run without requiring external network connections or active API keys.
+All 39 unit tests run completely offline without requiring external network connections or API credits.
 
 ---
 
