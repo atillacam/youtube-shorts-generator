@@ -17,6 +17,8 @@ from src.shorts_generator.config import (
     DEFAULT_FPS,
     GEMINI_API_KEY,
     PIXABAY_API_KEY,
+    validate_environment,
+    SUBTITLE_STYLE_PRESETS,
 )
 from src.shorts_generator.utils import (
     slugify_text,
@@ -38,7 +40,9 @@ from src.shorts_generator.downloader import (
 )
 from src.shorts_generator.tts_engine import (
     text_to_speech,
+    get_available_voice_aliases,
 )
+
 from src.shorts_generator.video_compositor import (
     apply_audio_volume,
     apply_audio_loop,
@@ -90,7 +94,7 @@ def parse_arguments() -> argparse.Namespace:
         "--voice",
         type=str,
         default=DEFAULT_VOICE,
-        help=f"Edge-TTS voice model (default: {DEFAULT_VOICE}, e.g. en-GB-RyanNeural, en-US-GuyNeural, tr-TR-AhmetNeural).",
+        help=f"Edge-TTS voice model or alias (default: {DEFAULT_VOICE}, or e.g. en-us-male, tr-male).",
     )
     parser.add_argument(
         "-c",
@@ -120,6 +124,28 @@ def parse_arguments() -> argparse.Namespace:
         help=f"Subtitle typography font size (default: {DEFAULT_FONT_SIZE}).",
     )
     parser.add_argument(
+        "--style-preset",
+        type=str,
+        default="viral_yellow",
+        choices=list(SUBTITLE_STYLE_PRESETS.keys()),
+        help="Caption typography preset (choices: viral_yellow, tiktok_cyan, classic_white, alert_red).",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Generate script and SEO metadata without downloading footage or rendering video.",
+    )
+    parser.add_argument(
+        "--list-voices",
+        action="store_true",
+        help="Display list of friendly voice aliases and exit.",
+    )
+    parser.add_argument(
+        "--validate-env",
+        action="store_true",
+        help="Check presence of Gemini and Pixabay API keys and exit.",
+    )
+    parser.add_argument(
         "--non-interactive",
         action="store_true",
         help="Run without interactive prompt when topic is omitted, using default topic.",
@@ -129,6 +155,20 @@ def parse_arguments() -> argparse.Namespace:
 
 async def main():
     args = parse_arguments()
+
+    if args.list_voices:
+        print("\n🎙️ Desteklenen Ses Modelleri ve Kısayol Etiketleri:")
+        for alias, voice_id in get_available_voice_aliases().items():
+            print(f"  - {alias:<14} -> {voice_id}")
+        return
+
+    if args.validate_env:
+        status = validate_environment()
+        print("\n🔑 API Ortam Değişkeni Doğrulama:")
+        print(f"  - GEMINI_API_KEY  : {'✅ Yapılandırıldı' if status['gemini_configured'] else '❌ Eksik'}")
+        print(f"  - PIXABAY_API_KEY : {'✅ Yapılandırıldı' if status['pixabay_configured'] else '❌ Eksik'}")
+        return
+
     default_topic = "How AI is revolutionizing software development"
 
     topic = args.topic
@@ -157,6 +197,7 @@ async def main():
         await pipeline.run(
             topic=topic,
             quick_output_path=args.output,
+            dry_run=args.dry_run,
         )
     except Exception as e:
         print(f"Error occurred during generation: {e}")
@@ -164,3 +205,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
