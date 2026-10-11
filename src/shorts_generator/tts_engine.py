@@ -7,6 +7,29 @@ from .config import DEFAULT_VOICE
 from .utils import srt_to_vtt
 
 
+POPULAR_VOICES = {
+    "en-us-male": "en-US-ChristopherNeural",
+    "en-us-female": "en-US-JennyNeural",
+    "en-gb-male": "en-GB-RyanNeural",
+    "en-gb-female": "en-GB-SoniaNeural",
+    "tr-male": "tr-TR-AhmetNeural",
+    "tr-female": "tr-TR-EmelNeural",
+}
+
+
+def resolve_voice_alias(voice_or_alias: str) -> str:
+    """Resolves short voice alias (e.g. 'en-us-male', 'tr-female') or returns given voice identifier."""
+    if not voice_or_alias:
+        return DEFAULT_VOICE
+    key = voice_or_alias.lower().strip()
+    return POPULAR_VOICES.get(key, voice_or_alias.strip())
+
+
+def get_available_voice_aliases() -> dict[str, str]:
+    """Returns mapping of available friendly voice aliases to neural model identifiers."""
+    return dict(POPULAR_VOICES)
+
+
 async def text_to_speech(
     text: str,
     output_audio: str = "output.mp3",
@@ -19,7 +42,7 @@ async def text_to_speech(
         text: Voiceover narrative text to speak.
         output_audio: Destination path for generated MP3 audio file.
         output_subtitle: Destination path for generated SRT subtitle file.
-        voice: Edge-TTS neural voice model name.
+        voice: Edge-TTS neural voice model name or friendly alias.
 
     Returns:
         tuple[str, str]: Paths to generated audio and subtitle files.
@@ -27,7 +50,9 @@ async def text_to_speech(
     if not text.strip():
         raise ValueError("Seslendirilecek metin bulunamadı!")
 
-    communicate = edge_tts.Communicate(text, voice)
+    actual_voice = resolve_voice_alias(voice)
+    communicate = edge_tts.Communicate(text, actual_voice)
+
     submaker = edge_tts.SubMaker()
 
     with open(output_audio, "wb") as f_audio:
