@@ -73,3 +73,15 @@ class PipelineResult:
             "metadata": self.metadata,
             "script": self.script,
         }
+
+    def __getitem__(self, item: str) -> Any:
+        if hasattr(self, item):
+            return getattr(self, item)
+        raise KeyError(item)
+
+    def __contains__(self, item: str) -> bool:
+        return hasattr(self, item)
+
+    def get(self, item: str, default: Any = None) -> Any:
+        return getattr(self, item, default)
+

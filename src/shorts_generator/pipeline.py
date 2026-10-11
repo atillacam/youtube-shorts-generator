@@ -4,7 +4,7 @@ import os
 import json
 import shutil
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Callable
 
 from .config import (
     DEFAULT_VOICE,
@@ -14,6 +14,7 @@ from .config import (
     DEFAULT_FONT_SIZE,
     DEFAULT_FPS,
 )
+from .models import PipelineResult
 from .utils import slugify_text
 from .script_generator import (
     generate_shorts_script,
@@ -49,15 +50,18 @@ class ShortsPipeline:
         self,
         topic: str,
         quick_output_path: str = DEFAULT_OUTPUT_FILENAME,
-    ) -> dict:
+        dry_run: bool = False,
+        progress_callback: Optional[Callable[[str, int], None]] = None,
+    ) -> PipelineResult:
         """Executes full automated pipeline for given video topic.
 
         Returns:
-            dict: Summary metadata and artifact paths produced during execution.
+            PipelineResult: Summary metadata and artifact paths produced during execution.
         """
         timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
         slug = slugify_text(topic)
         project_dir = os.path.join(self.output_dir_base, f"{timestamp_str}_{slug}")
+
         bg_dir = os.path.join(project_dir, "backgrounds")
         os.makedirs(bg_dir, exist_ok=True)
 
@@ -77,6 +81,8 @@ class ShortsPipeline:
         print(f"{'=' * 60}\n")
 
         # 1. Script Generation
+        if progress_callback:
+            progress_callback("Generating script", 15)
         script = generate_shorts_script(topic)
         print("=== 1. GENERATED VIRAL SHORTS SCRIPT (ENGLISH) ===")
         print(script)
@@ -85,6 +91,8 @@ class ShortsPipeline:
         print(f"💾 Senaryo arşivlendi: '{project_script_path}'\n")
 
         # 2. YouTube SEO Metadata
+        if progress_callback:
+            progress_callback("Generating SEO metadata", 30)
         print("=== 2. GENERATING YOUTUBE SEO METADATA ===")
         metadata = generate_youtube_metadata(topic, script)
         with open(project_meta_path, "w", encoding="utf-8") as f_meta:
@@ -99,7 +107,23 @@ class ShortsPipeline:
         print(f"🏷️ Etiketler: {', '.join(metadata.get('tags', []))}")
         print(f"💾 Metadata kaydedildi: '{project_meta_path}' ve '{root_meta_file}'\n")
 
+        if dry_run:
+            if progress_callback:
+                progress_callback("Dry run complete", 100)
+            print("[Dry Run] Senaryo ve metadata üretimi tamamlandı. Video işleme adımları atlanıyor.")
+            return PipelineResult(
+                topic=topic,
+                project_dir=project_dir,
+                video_path="",
+                quick_output_path=quick_output_path,
+                metadata_path=project_meta_path,
+                metadata=metadata,
+                script=script,
+            )
+
         # 3. Pixabay Multi-Scene Background Downloads
+        if progress_callback:
+            progress_callback("Downloading background footage", 50)
         scene_queries = extract_scene_search_queries(script, topic=topic)
         print("=== 3. MULTI-SCENE BACKGROUND VIDEO DISCOVERY & DOWNLOAD ===")
         print(f"Extracted Scene Queries: {scene_queries}")
@@ -112,12 +136,16 @@ class ShortsPipeline:
             print("Background videos could not be downloaded. Falling back to default background.\n")
 
         # 4. Spoken Narration Extraction
+        if progress_callback:
+            progress_callback("Extracting spoken narration", 65)
         voiceover_text = extract_voiceover(script)
         print("=== 4. EXTRACTED VOICEOVER NARRATION ===")
         print(voiceover_text)
         print("\n" + "=" * 40 + "\n")
 
         # 5. Voiceover Synthesis & Synchronized Subtitles
+        if progress_callback:
+            progress_callback("Synthesizing voiceover and subtitles", 80)
         print(f"Generating voiceover and time-synced subtitles (Voice: {self.voice})...")
         await text_to_speech(
             voiceover_text,
@@ -138,6 +166,8 @@ class ShortsPipeline:
         print(f"Success! Audio: '{project_audio_path}', Subtitles: '{project_sub_path}'\n")
 
         # 6. Video Compositing & Captions
+        if progress_callback:
+            progress_callback("Rendering video and compositing captions", 95)
         print("=== 6. VIDEO EDITING, AUDIO MIXING & CAPTIONS COMPOSITING ===")
         create_final_video(
             audio_path=project_audio_path,
@@ -155,18 +185,22 @@ class ShortsPipeline:
         except Exception:
             pass
 
+        if progress_callback:
+            progress_callback("Complete", 100)
+
         print("\n🎉 Tüm süreç başarıyla tamamlandı!")
         print(f"🎬 Konuya Özel Video: {project_video_path}")
         print(f"📁 Proje Arşiv Klasörü: {project_dir}")
         print(f"🚀 Hızlı Erişim: {quick_output_path}")
         print(f"📋 YouTube Metadata: {project_meta_path}")
 
-        return {
-            "topic": topic,
-            "project_dir": project_dir,
-            "video_path": project_video_path,
-            "quick_output_path": quick_output_path,
-            "metadata_path": project_meta_path,
-            "metadata": metadata,
-            "script": script,
-        }
+        return PipelineResult(
+            topic=topic,
+            project_dir=project_dir,
+            video_path=project_video_path,
+            quick_output_path=quick_output_path,
+            metadata_path=project_meta_path,
+            metadata=metadata,
+            script=script,
+        )
+
