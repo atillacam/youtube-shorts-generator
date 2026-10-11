@@ -10,6 +10,20 @@ from typing import Optional
 from .config import PIXABAY_API_KEY
 
 
+def is_valid_video_file(file_path: str, min_size_bytes: int = 1000) -> bool:
+    """Checks whether a downloaded video file exists, exceeds minimum size, and has readable bytes."""
+    if not os.path.exists(file_path):
+        return False
+    if os.path.getsize(file_path) < min_size_bytes:
+        return False
+    try:
+        with open(file_path, "rb") as f:
+            header = f.read(32)
+            return len(header) >= 16
+    except Exception:
+        return False
+
+
 def score_video_hit(hit_item: dict) -> int:
     """Calculates suitability score favoring vertical 9:16 portrait orientation and HD resolutions."""
     videos = hit_item.get("videos", {})
@@ -20,6 +34,7 @@ def score_video_hit(hit_item: dict) -> int:
     is_vertical = 15 if h > w else 0
     is_hd = 8 if (w >= 1080 or h >= 1080) else (4 if (w >= 720 or h >= 720) else 0)
     return is_vertical + is_hd
+
 
 
 def select_best_stream_info(videos: dict) -> Optional[dict]:
@@ -141,12 +156,13 @@ def download_scene_background_videos(
                         f.write(chunk)
                 downloaded = True
 
-            if downloaded and os.path.exists(output_file) and os.path.getsize(output_file) > 1000:
+            if downloaded and is_valid_video_file(output_file, min_size_bytes=1000):
                 size_mb = os.path.getsize(output_file) / (1024 * 1024)
                 print(f"[Pixabay] Başarılı! {output_file} kaydedildi ({size_mb:.2f} MB)")
                 downloaded_files.append(output_file)
             else:
-                print(f"[Pixabay] Video indirilemedi: {output_file}")
+                print(f"[Pixabay] Video indirilemedi veya dosya bozuk: {output_file}")
+
         except Exception as dl_err:
             print(f"[Pixabay] Sahne {i+1} indirme hatası: {dl_err}")
 
