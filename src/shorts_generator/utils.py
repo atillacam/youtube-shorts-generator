@@ -18,6 +18,34 @@ def slugify_text(text: str) -> str:
     return cleaned[:45] if cleaned else "shorts"
 
 
+def clean_subtitle_text(text: str) -> str:
+    """Strips markdown syntax, emojis, and unwanted formatting from subtitle strings."""
+    if not text:
+        return ""
+    # Strip markdown bold/italic/backtick/tags
+    cleaned = re.sub(r"[\*_#`~]", "", text)
+    # Remove bracketed cues like [Applause] or (Laughs)
+    cleaned = re.sub(r"\[.*?\]|\(.*?\)", "", cleaned)
+    # Remove emojis and high unicode pictorial symbols
+    cleaned = re.sub(
+        r"[\U00010000-\U0010ffff]",
+        "",
+        cleaned,
+        flags=re.UNICODE,
+    )
+    # Normalize whitespaces
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def estimate_narration_duration(text: str, words_per_minute: int = 150) -> float:
+    """Calculates approximate speech duration in seconds for a given narration script."""
+    words = text.split()
+    if not words:
+        return 0.0
+    return round((len(words) / words_per_minute) * 60.0, 2)
+
+
+
 def srt_to_vtt(srt_content: str) -> str:
     """SRT biçimindeki altyazı içeriğini standart WebVTT formatına dönüştürür.
 

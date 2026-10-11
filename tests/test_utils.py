@@ -9,7 +9,10 @@ from src.shorts_generator.utils import (
     srt_to_vtt,
     parse_subtitles,
     split_cue_into_shorts_chunks,
+    clean_subtitle_text,
+    estimate_narration_duration,
 )
+
 
 
 class TestUtils(unittest.TestCase):
@@ -76,6 +79,22 @@ class TestUtils(unittest.TestCase):
         parsed = parse_subtitles("non_existent_file.srt")
         self.assertEqual(parsed, [])
 
+    def test_clean_subtitle_text_strips_markdown_and_emojis(self):
+        dirty = "**ATTENTION!** [dramatic sound] You won't believe this 🔥 #viral"
+        cleaned = clean_subtitle_text(dirty)
+        self.assertEqual(cleaned, "ATTENTION! You won't believe this viral")
+
+    def test_clean_subtitle_text_empty(self):
+        self.assertEqual(clean_subtitle_text(""), "")
+
+    def test_estimate_narration_duration(self):
+        # 150 words per minute -> 2.5 words per second
+        text_50_words = " ".join(["word"] * 50)
+        duration = estimate_narration_duration(text_50_words, words_per_minute=150)
+        self.assertAlmostEqual(duration, 20.0, places=1)
+        self.assertEqual(estimate_narration_duration(""), 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()
+
