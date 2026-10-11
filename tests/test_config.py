@@ -37,6 +37,17 @@ class TestConfig(unittest.TestCase):
         self.assertIsInstance(val["gemini_configured"], bool)
         self.assertIsInstance(val["pixabay_configured"], bool)
 
+    def test_subtitle_presets_and_lookup(self):
+        from src.shorts_generator.config import SUBTITLE_STYLE_PRESETS, get_subtitle_style_preset
+        self.assertIn("viral_yellow", SUBTITLE_STYLE_PRESETS)
+        self.assertIn("tiktok_cyan", SUBTITLE_STYLE_PRESETS)
+        preset = get_subtitle_style_preset("tiktok_cyan")
+        self.assertEqual(preset["text_color"], "#00F2FE")
+        # Fallback to viral_yellow when unknown
+        fallback = get_subtitle_style_preset("unknown_style")
+        self.assertEqual(fallback["text_color"], "#FFE600")
+
 
 if __name__ == "__main__":
     unittest.main()
+

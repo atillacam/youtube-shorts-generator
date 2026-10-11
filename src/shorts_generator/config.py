@@ -54,6 +54,46 @@ DEFAULT_OUTPUT_FILENAME = "final_shorts.mp4"
 DEFAULT_BG_MUSIC = "bg_music.mp3"
 
 
+# Subtitle Style Presets
+SUBTITLE_STYLE_PRESETS: dict[str, dict] = {
+    "viral_yellow": {
+        "text_color": "#FFE600",
+        "stroke_color": "#000000",
+        "stroke_width": 4,
+        "font_size": 96,
+        "uppercase": True,
+    },
+    "tiktok_cyan": {
+        "text_color": "#00F2FE",
+        "stroke_color": "#000000",
+        "stroke_width": 4,
+        "font_size": 96,
+        "uppercase": True,
+    },
+    "classic_white": {
+        "text_color": "#FFFFFF",
+        "stroke_color": "#000000",
+        "stroke_width": 4,
+        "font_size": 92,
+        "uppercase": True,
+    },
+    "alert_red": {
+        "text_color": "#FF2A2A",
+        "stroke_color": "#FFFFFF",
+        "stroke_width": 3,
+        "font_size": 96,
+        "uppercase": True,
+    },
+}
+
+SUPPORTED_CONTAINER_FORMATS = ("mp4", "mov", "mkv")
+
+
+def get_subtitle_style_preset(preset_name: str = "viral_yellow") -> dict:
+    """Retrieves typography style configurations for captions by preset name."""
+    return SUBTITLE_STYLE_PRESETS.get(preset_name, SUBTITLE_STYLE_PRESETS["viral_yellow"])
+
+
 def find_system_font() -> str | None:
     """Finds best available impact or bold system font for high retention shorts."""
     candidate_paths = [
@@ -78,3 +118,4 @@ def validate_environment() -> dict[str, bool]:
         "gemini_configured": bool(GEMINI_API_KEY),
         "pixabay_configured": bool(PIXABAY_API_KEY),
     }
+
